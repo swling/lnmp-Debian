@@ -1,0 +1,568 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -r /etc/lnmp-debian.conf ]]; then
+    # shellcheck disable=SC1091
+    . /etc/lnmp-debian.conf
+elif [[ -r "${SCRIPT_DIR}/lnmp-debian.conf" ]]; then
+    # shellcheck disable=SC1091
+    . "${SCRIPT_DIR}/lnmp-debian.conf"
+fi
+
+NGINX_CONF=/usr/local/nginx/conf
+VHOST_DIR="${NGINX_CONF}/vhost"
+SSL_DIR="${NGINX_CONF}/ssl"
+REWRITE_DIR="${NGINX_CONF}/rewrite"
+WEB_ROOT="${WEB_ROOT:-/home/wwwroot}"
+DEFAULT_WEB_ROOT="${DEFAULT_WEB_ROOT:-${WEB_ROOT}/default}"
+NGINX_LOG_DIR="${NGINX_LOG_DIR:-/home/wwwlogs}"
+MYSQL_DATA_DIR="${MYSQL_DATA_DIR:-/var/lib/mysql}"
+ACME_HOME=/usr/local/acme.sh
+ACME_BIN="$(command -v acme.sh || true)"
+MYSQL_BIN=/usr/local/mysql/bin/mysql
+is_supported_php_version() {
+    local major
+    [[ "$1" =~ ^([0-9]+)\.[0-9]+$ ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    (( 10#$major >= 8 ))
+}
+
+PHP_FPM_VERSION=
+if [[ -r /etc/lnmp-debian/php-version ]]; then
+    IFS= read -r PHP_FPM_VERSION < /etc/lnmp-debian/php-version || true
+fi
+if ! is_supported_php_version "$PHP_FPM_VERSION"; then
+    PHP_FPM_VERSION="${PHP_VERSION:-}"
+fi
+if ! is_supported_php_version "$PHP_FPM_VERSION"; then
+    PHP_FPM_VERSION="$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;' 2>/dev/null || true)"
+fi
+if ! is_supported_php_version "$PHP_FPM_VERSION"; then
+    PHP_FPM_VERSION=
+    for php_fpm_dir in /etc/php/*/fpm; do
+        [[ -d "$php_fpm_dir" ]] || continue
+        php_candidate="${php_fpm_dir#/etc/php/}"
+        php_candidate="${php_candidate%/fpm}"
+        if is_supported_php_version "$php_candidate"; then
+            if [[ -n "$PHP_FPM_VERSION" ]]; then
+                PHP_FPM_VERSION=
+                break
+            fi
+            PHP_FPM_VERSION=$php_candidate
+        fi
+    done
+fi
+
+usage() {
+    cat <<'EOF'
+Usage:
+  lnmp {start|stop|reload|restart|kill|status}
+  lnmp {nginx|mysql|mariadb|php-fpm} {start|stop|reload|restart|kill|status}
+  lnmp vhost {add|list|del}
+  lnmp database {add|list|edit|del}
+  lnmp addons {install|uninstall} <addon>
+  lnmp ssl add
+  lnmp {dnsssl|dns|onlyssl} {ali|cf|dp|he|gd|aws|namecheap|namesilo}
+EOF
+}
+
+fail() {
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+require_root() {
+    [[ "$(id -u)" -eq 0 ]] || fail "Run this command as root."
+}
+
+require_nginx() {
+    [[ -x /usr/local/nginx/sbin/nginx && -d "$VHOST_DIR" ]] ||
+        fail "LNMP Debian is not installed. Run lnmp-Debian/install.sh first."
+}
+
+valid_domain() {
+    [[ "$1" =~ ^(\*\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]
+}
+
+reload_nginx() {
+    printf 'Testing Nginx configuration...\n'
+    /usr/local/nginx/sbin/nginx -t
+    printf 'Reloading Nginx...\n'
+    systemctl reload nginx
+    printf 'Nginx reloaded.\n'
+}
+
+service_action() {
+    local action=$1 service=$2
+    [[ "$action" != kill ]] || action=stop
+    local unit label state verb completed
+    case "$service" in
+        nginx) unit=nginx; label=Nginx ;;
+        mysql|mariadb) unit=mysql; label=MySQL ;;
+        php-fpm)
+            [[ -n "$PHP_FPM_VERSION" ]] || fail "Could not determine the installed PHP-FPM version."
+            if [[ -r /etc/lnmp-debian/php-upstream-service ]]; then
+                IFS= read -r unit < /etc/lnmp-debian/php-upstream-service || true
+                [[ "$unit" == lnmp-php-upstream ]] ||
+                    fail "Unknown PHP-FPM service configured in /etc/lnmp-debian/php-upstream-service."
+            else
+                unit="php${PHP_FPM_VERSION}-fpm"
+            fi
+            label=PHP-FPM
+            ;;
+        *) fail "Unknown service: $service" ;;
+    esac
+    if [[ "$action" == status ]]; then
+        state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+        printf '%-8s %s\n' "${label}:" "${state:-unknown}"
+    else
+        case "$action" in
+            start) verb=Starting; completed=started ;;
+            stop) verb=Stopping; completed=stopped ;;
+            restart) verb=Restarting; completed=restarted ;;
+            reload) verb=Reloading; completed=reloaded ;;
+            *) fail "Unsupported service action: $action" ;;
+        esac
+        printf '%s %s...\n' "$verb" "$label"
+        systemctl "$action" "$unit"
+        printf '%s %s.\n' "$label" "$completed"
+    fi
+}
+
+service_bundle() {
+    local action=$1 service
+    printf 'LNMP: %s services\n' "$action"
+    for service in nginx mysql php-fpm; do
+        service_action "$action" "$service"
+    done
+    printf 'LNMP service group %s complete.\n' "$action"
+}
+
+create_vhost_config() {
+    local domain=$1 names=$2 webroot=$3 rewrite=$4 php_config=$5 ipv6_listen=$6 access_log=$7
+    local config="${VHOST_DIR}/${domain}.conf"
+    [[ ! -e "$config" ]] || fail "Virtual host already exists: $domain"
+    [[ "$webroot" == /* && "$webroot" =~ ^/[A-Za-z0-9_./-]+$ ]] ||
+        fail "Web root must be an absolute path using only letters, digits, dot, underscore, slash, or hyphen."
+    [[ "$rewrite" =~ ^[A-Za-z0-9_-]+$ ]] || fail "Invalid rewrite profile name."
+    [[ "$php_config" == enable-php.conf || "$php_config" == enable-php-pathinfo.conf ]] ||
+        fail "Invalid PHP configuration."
+    if [[ ! -e "${REWRITE_DIR}/${rewrite}.conf" && ! -L "${REWRITE_DIR}/${rewrite}.conf" ]]; then
+        : > "${REWRITE_DIR}/${rewrite}.conf"
+        printf 'Created custom rewrite file: %s\n' "${REWRITE_DIR}/${rewrite}.conf"
+    fi
+
+    if [[ ! -d "$webroot" ]]; then
+        mkdir -p "$webroot"
+        chown www:www "$webroot"
+    fi
+    cat > "$config" <<EOF
+server
+{
+    listen 80;
+    ${ipv6_listen}
+    server_name ${names};
+    index index.html index.htm index.php;
+    root ${webroot};
+
+    include rewrite/${rewrite}.conf;
+    include ${php_config};
+
+    location ~* \.(gif|jpe?g|png|bmp|swf|ico|webp)$ {
+        expires 30d;
+    }
+
+    location ~* \.(js|css)$ {
+        expires 12h;
+    }
+
+    location ~ /.well-known {
+        allow all;
+    }
+
+    location ~ /\\. {
+        deny all;
+    }
+
+    ${access_log}
+}
+EOF
+    if ! reload_nginx; then
+        rm -f "$config"
+        fail "Nginx rejected the new virtual host; its config was removed."
+    fi
+    printf 'Virtual host created: %s\nWeb root: %s\n' "$domain" "$webroot"
+}
+
+add_vhost() {
+    local domain more_names webroot rewrite allow_rewrite pathinfo_choice php_config
+    local ipv6_choice ipv6_listen access_choice access_line name
+    local -a additional_names rewrite_profiles
+    require_root
+    require_nginx
+    read -r -p "Please enter domain (example: www.example.com): " domain
+    valid_domain "$domain" || fail "Invalid domain name."
+    [[ ! -e "${VHOST_DIR}/${domain}.conf" ]] || fail "Virtual host already exists: $domain"
+
+    read -r -p "Enter additional domain names (optional): " more_names
+    read -r -a additional_names <<< "$more_names"
+    for name in "${additional_names[@]}"; do
+        valid_domain "$name" || fail "Invalid additional domain name: $name"
+    done
+    read -r -p "Web root [${WEB_ROOT}/${domain}]: " webroot
+    webroot="${webroot:-${WEB_ROOT}/${domain}}"
+    read -r -p "Enable pseudo-static rewrite rules? [y/N]: " allow_rewrite
+    if [[ "$allow_rewrite" =~ ^[Yy]$ ]]; then
+        mapfile -t rewrite_profiles < <(
+            find "$REWRITE_DIR" -maxdepth 1 -type f -name '*.conf' -print |
+                sed 's#^.*/##; s/\.conf$//' | sort
+        )
+        printf 'Available rewrite profiles:\n'
+        printf '  %s\n' "${rewrite_profiles[@]}"
+        read -r -p "Rewrite profile [other]: " rewrite
+        rewrite="${rewrite:-other}"
+    else
+        rewrite=none
+    fi
+    [[ "$rewrite" =~ ^[A-Za-z0-9_-]+$ ]] || fail "Invalid rewrite profile name."
+    printf 'Using rewrite profile: %s\n' "$rewrite"
+
+    read -r -p "Enable PHP Pathinfo? [y/N]: " pathinfo_choice
+    if [[ "$pathinfo_choice" =~ ^[Yy]$ ]]; then
+        php_config=enable-php-pathinfo.conf
+    else
+        php_config=enable-php.conf
+    fi
+    read -r -p "Enable IPv6 listener? [y/N]: " ipv6_choice
+    if [[ "$ipv6_choice" =~ ^[Yy]$ ]]; then
+        ipv6_listen='listen [::]:80;'
+    else
+        ipv6_listen=
+    fi
+
+    read -r -p "Enable access log? [Y/n]: " access_choice
+    if [[ "$access_choice" =~ ^[Nn]$ ]]; then
+        access_line="access_log off;"
+    else
+        mkdir -p "$NGINX_LOG_DIR"
+        touch "${NGINX_LOG_DIR}/${domain}.log"
+        access_line="access_log ${NGINX_LOG_DIR}/${domain}.log;"
+    fi
+
+    create_vhost_config "$domain" "$domain $more_names" "$webroot" "$rewrite" \
+        "$php_config" "$ipv6_listen" "$access_line"
+}
+
+list_vhosts() {
+    require_nginx
+    printf 'Nginx Virtualhost list:\n'
+    find "$VHOST_DIR" -maxdepth 1 -type f -name '*.conf' -print |
+        sed 's#^.*/##; s/\.conf$//' | sort
+}
+
+delete_vhost() {
+    local domain backup
+    require_root
+    require_nginx
+    list_vhosts
+    read -r -p "Please enter domain you want to delete: " domain
+    valid_domain "$domain" || fail "Invalid domain name."
+    [[ -f "${VHOST_DIR}/${domain}.conf" ]] || fail "Virtual host does not exist: $domain"
+    backup="$(mktemp)"
+    mv -- "${VHOST_DIR}/${domain}.conf" "$backup"
+    if ! reload_nginx; then
+        mv "$backup" "${VHOST_DIR}/${domain}.conf"
+        fail "Nginx rejected the change; the virtual host config was restored."
+    fi
+    rm -f "$backup"
+    printf 'Domain config deleted. Website files were not removed: %s\n' "$domain"
+}
+
+mysql_query() {
+    [[ -x "$MYSQL_BIN" ]] || fail "MySQL client is unavailable."
+    "$MYSQL_BIN" --protocol=socket -uroot -p "$@"
+}
+
+valid_sql_identifier() {
+    [[ "$1" =~ ^[A-Za-z0-9_]+$ ]]
+}
+
+database_action() {
+    local action=$1 database username password escaped_password
+    case "$action" in
+        list)
+            mysql_query -NBe "SHOW DATABASES;"
+            ;;
+        add)
+            require_root
+            read -r -p "Database name: " database
+            read -r -p "Database user: " username
+            valid_sql_identifier "$database" && valid_sql_identifier "$username" ||
+                fail "Database and user names may contain only letters, digits, and underscores."
+            read -r -s -p "Database password: " password
+            printf '\n'
+            [[ -n "$password" ]] || fail "Database password cannot be empty."
+            escaped_password="${password//\'/\'\'}"
+            printf "CREATE DATABASE \`%s\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\nCREATE USER '%s'@'localhost' IDENTIFIED BY '%s';\nGRANT ALL PRIVILEGES ON \`%s\`.* TO '%s'@'localhost';\nFLUSH PRIVILEGES;\n" \
+                "$database" "$username" "$escaped_password" "$database" "$username" |
+                mysql_query
+            printf 'Database and user created: %s\n' "$database"
+            ;;
+        edit)
+            require_root
+            read -r -p "Database user: " username
+            valid_sql_identifier "$username" || fail "Invalid database user."
+            read -r -s -p "New password: " password
+            printf '\n'
+            [[ -n "$password" ]] || fail "Database password cannot be empty."
+            escaped_password="${password//\'/\'\'}"
+            printf "ALTER USER '%s'@'localhost' IDENTIFIED BY '%s';\n" \
+                "$username" "$escaped_password" | mysql_query
+            printf 'Password changed for database user: %s\n' "$username"
+            ;;
+        del)
+            require_root
+            read -r -p "Database name: " database
+            valid_sql_identifier "$database" || fail "Invalid database name."
+            printf "DROP DATABASE \`%s\`;\n" "$database" | mysql_query
+            printf 'Database dropped: %s\n' "$database"
+            ;;
+        *) usage >&2; exit 2 ;;
+    esac
+}
+
+collect_cert_domains() {
+    local name
+    local -a additional_names
+    read -r -p "Please enter domain: " CERT_DOMAIN
+    valid_domain "$CERT_DOMAIN" || fail "Invalid domain name."
+    read -r -p "Enter additional domain names (optional): " CERT_MORE
+    read -r -a additional_names <<< "$CERT_MORE"
+    for name in "${additional_names[@]}"; do
+        valid_domain "$name" || fail "Invalid additional domain name: $name"
+    done
+    CERT_NAMES="$CERT_DOMAIN"
+    [[ -z "$CERT_MORE" ]] || CERT_NAMES+=" $CERT_MORE"
+}
+
+collect_email() {
+    read -r -p "Email address for certificate expiry notices: " CERT_EMAIL
+    [[ "$CERT_EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] ||
+        fail "A valid email address is required."
+}
+
+append_ssl_config() {
+    local domain=$1 names=$2 cert=$3 key=$4 config="${VHOST_DIR}/${1}.conf"
+    local webroot rewrite backup
+    [[ -f "$config" ]] || fail "Create the virtual host first: lnmp vhost add"
+    if grep -Eq 'listen[[:space:]]+443' "$config"; then
+        fail "An HTTPS server block already exists for $domain."
+    fi
+    webroot="$(awk '/^[[:space:]]*root[[:space:]]+/ {print $2; exit}' "$config" | tr -d ';')"
+    [[ -n "$webroot" ]] || fail "Could not find a root directive in $config."
+    rewrite="$(grep -m1 -E '^[[:space:]]*include[[:space:]]+rewrite/[^;]+;' "$config" || true)"
+    rewrite="${rewrite:-include rewrite/none.conf;}"
+    backup="$(mktemp)"
+    cp "$config" "$backup"
+    cat >> "$config" <<EOF
+
+server
+{
+    listen 443 ssl;
+    server_name ${names};
+    index index.html index.htm index.php;
+    root ${webroot};
+
+    ssl_certificate ${cert};
+    ssl_certificate_key ${key};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    ${rewrite}
+    include enable-php.conf;
+
+    location ~ /\\. {
+        deny all;
+    }
+}
+EOF
+    if ! /usr/local/nginx/sbin/nginx -t; then
+        mv "$backup" "$config"
+        fail "Nginx rejected the HTTPS config; the previous virtual host config was restored."
+    fi
+    if ! systemctl reload nginx; then
+        mv "$backup" "$config"
+        fail "Nginx reload failed; the previous virtual host config was restored."
+    fi
+    rm -f "$backup"
+}
+
+issue_certificate() {
+    local challenge=$1 provider=${2:-} ca=$3 webroot=${4:-}
+    local name dns_plugin cert_dir cert key
+    local -a domain_args additional_names
+    [[ -n "$ACME_BIN" ]] || fail "acme.sh is missing; install the Debian package with apt."
+    [[ -n "${CERT_EMAIL:-}" ]] || collect_email
+    mkdir -p "$ACME_HOME" "$SSL_DIR"
+    domain_args=(-d "$CERT_DOMAIN")
+    read -r -a additional_names <<< "$CERT_MORE"
+    for name in "${additional_names[@]}"; do
+        domain_args+=(-d "$name")
+    done
+
+    if [[ "$challenge" == webroot ]]; then
+        [[ "$CERT_DOMAIN" != \*.* ]] || fail "Wildcard certificates require DNS validation."
+        read -r -p "Web root [${WEB_ROOT}/${CERT_DOMAIN}]: " webroot
+        webroot="${webroot:-${WEB_ROOT}/${CERT_DOMAIN}}"
+        [[ -d "$webroot" ]] || fail "Web root does not exist: $webroot"
+        "$ACME_BIN" --home "$ACME_HOME" --register-account -m "$CERT_EMAIL" --server "$ca"
+        "$ACME_BIN" --home "$ACME_HOME" --issue --server "$ca" \
+            "${domain_args[@]}" --webroot "$webroot" --keylength 2048
+    else
+        if [[ -n "$provider" ]]; then
+            dns_plugin="dns_${provider}"
+        else
+            fail "DNS provider is required for DNS validation."
+        fi
+        "$ACME_BIN" --home "$ACME_HOME" --register-account -m "$CERT_EMAIL" --server "$ca"
+        "$ACME_BIN" --home "$ACME_HOME" --issue --server "$ca" \
+            "${domain_args[@]}" --dns "$dns_plugin" --keylength 2048
+    fi
+
+    cert_dir="${SSL_DIR}/${CERT_DOMAIN}"
+    cert="${cert_dir}/fullchain.cer"
+    key="${cert_dir}/${CERT_DOMAIN}.key"
+    mkdir -p "$cert_dir"
+    "$ACME_BIN" --home "$ACME_HOME" --install-cert -d "$CERT_DOMAIN" \
+        --key-file "$key" --fullchain-file "$cert" \
+        --reloadcmd "systemctl reload nginx"
+    [[ -s "$cert" && -s "$key" ]] || fail "ACME client did not install the certificate files."
+    if [[ "$challenge" == webroot ]]; then
+        append_ssl_config "$CERT_DOMAIN" "$CERT_NAMES" "$cert" "$key"
+    fi
+    printf 'Certificate: %s\nPrivate key: %s\n' "$cert" "$key"
+}
+
+ssl_add() {
+    local choice cert key ca
+    require_root
+    require_nginx
+    collect_cert_domains
+    [[ -f "${VHOST_DIR}/${CERT_DOMAIN}.conf" ]] ||
+        fail "Virtual host not found. Create it first with: lnmp vhost add"
+    printf '1: Use your own SSL certificate and key\n'
+    printf '2: Let us Encrypt\n'
+    printf '3: BuyPass\n'
+    printf '4: ZeroSSL\n'
+    read -r -p "Enter 1, 2, 3 or 4: " choice
+    case "$choice" in
+        1)
+            read -r -p "Full path to certificate: " cert
+            read -r -p "Full path to private key: " key
+            [[ -s "$cert" && -s "$key" ]] || fail "Certificate or key file does not exist."
+            append_ssl_config "$CERT_DOMAIN" "$CERT_NAMES" "$cert" "$key"
+            ;;
+        2) ca=letsencrypt ;;
+        3) ca=buypass ;;
+        4) ca=zerossl ;;
+        *) fail "Choose 1, 2, 3, or 4." ;;
+    esac
+    if [[ "$choice" != 1 ]]; then
+        [[ "$CERT_DOMAIN" != \*.* ]] || fail "Wildcard certificates require lnmp dnsssl."
+        issue_certificate webroot "" "$ca"
+    fi
+}
+
+dns_ssl() {
+    local provider=$1 mode=${2:-enable} challenge=dns ca choice
+    require_root
+    require_nginx
+    case "$provider" in
+        ali|cf|dp|he|gd|aws|namecheap|namesilo) ;;
+        *) fail "Unsupported DNS provider: $provider" ;;
+    esac
+    collect_cert_domains
+    read -r -p "Use Let's Encrypt or ZeroSSL? [1/2]: " choice
+    case "${choice:-1}" in
+        1) ca=letsencrypt ;;
+        2) ca=zerossl ;;
+        *) fail "Choose 1 or 2." ;;
+    esac
+    collect_email
+    issue_certificate "$challenge" "$provider" "$ca"
+    if [[ "$mode" == onlyssl ]]; then
+        return
+    fi
+    [[ -f "${VHOST_DIR}/${CERT_DOMAIN}.conf" ]] ||
+        fail "Certificate issued. Create a virtual host before enabling HTTPS."
+    append_ssl_config "$CERT_DOMAIN" "$CERT_NAMES" \
+        "${SSL_DIR}/${CERT_DOMAIN}/fullchain.cer" \
+        "${SSL_DIR}/${CERT_DOMAIN}/${CERT_DOMAIN}.key"
+}
+
+case "${1:-}" in
+    --help|-h)
+        usage
+        exit 0
+        ;;
+    start|stop|restart|reload)
+        require_root
+        service_bundle "$1"
+        ;;
+    kill)
+        require_root
+        service_bundle stop
+        ;;
+    status)
+        service_action status nginx
+        service_action status mysql
+        if [[ -n "$PHP_FPM_VERSION" ]]; then
+            service_action status php-fpm
+        else
+            printf '%-8s %s\n' "PHP-FPM:" unknown
+        fi
+        ;;
+    nginx|mysql|mariadb|php-fpm)
+        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+        require_root
+        case "$2" in
+            start|stop|restart|reload|kill|status) ;;
+            *) usage >&2; exit 2 ;;
+        esac
+        service_action "$2" "$1"
+        ;;
+    vhost)
+        case "${2:-}" in
+            add) add_vhost ;;
+            list) list_vhosts ;;
+            del) delete_vhost ;;
+            *) usage >&2; exit 2 ;;
+        esac
+        ;;
+    database)
+        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+        database_action "$2"
+        ;;
+    addons)
+        shift
+        exec /usr/local/bin/addons.sh "$@"
+        ;;
+    ssl)
+        [[ "${2:-}" == add ]] || { usage >&2; exit 2; }
+        ssl_add
+        ;;
+    dnsssl|dns)
+        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+        dns_ssl "$2"
+        ;;
+    onlyssl)
+        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+        dns_ssl "$2" onlyssl
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
