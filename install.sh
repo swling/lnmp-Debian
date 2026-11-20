@@ -95,7 +95,7 @@ select_package_version() {
 }
 
 select_php_version() {
-    local choice index default_index candidate marker
+    local choice index default_index candidate marker php_major
     local -a versions
     local -a package_names
     mapfile -t package_names < <(
@@ -106,16 +106,16 @@ select_php_version() {
     )
     versions=()
     for candidate in "${package_names[@]}"; do
+        php_major="${candidate%%.*}"
+        [[ "$php_major" =~ ^[0-9]+$ ]] || continue
+        # Skip older branches instead of aborting when the repo also offers PHP 7.x.
+        (( php_major >= 8 )) || continue
         if apt-cache policy "php${candidate}-fpm" |
             awk '/Candidate:/ { found = ($2 != "(none)") } END { exit !found }'; then
             versions+=("$candidate")
         fi
     done
-    ((${#versions[@]} > 0)) || fail "No PHP-FPM packages are available from the configured APT repositories."
-    for index in "${!versions[@]}"; do
-        [[ "${versions[index]%%.*}" -ge 8 ]] ||
-            fail "APT offered PHP ${versions[index]}, but this profile requires PHP 8 or later."
-    done
+    ((${#versions[@]} > 0)) || fail "No PHP 8+ FPM packages are available from the configured APT repositories."
     default_index=$((${#versions[@]} - 1))
     if [[ -n "$PHP_VERSION" ]]; then
         for index in "${!versions[@]}"; do
@@ -242,6 +242,10 @@ validate_platform() {
     command -v apt-get >/dev/null || fail "apt-get is required."
 }
 
+directory_has_entries() {
+    [[ -n "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]
+}
+
 validate_configuration_and_existing_data() {
     local configured_path
     for configured_path in "$WEB_ROOT" "$DEFAULT_WEB_ROOT" "$NGINX_LOG_DIR" "$MYSQL_DATA_DIR"; do
@@ -265,12 +269,12 @@ validate_configuration_and_existing_data() {
         fail "MariaDB is already installed. Back it up and remove or migrate it before installing MySQL."
     fi
     if [[ -d /var/lib/mysql ]] &&
-       find /var/lib/mysql -mindepth 1 -maxdepth 1 -print -quit | grep -q . &&
+       directory_has_entries /var/lib/mysql &&
        [[ "$mysql_community_status" != installed ]]; then
         fail "Existing database files were found in /var/lib/mysql. Back them up and migrate them before installing."
     fi
     if [[ "$MYSQL_DATA_DIR" != /var/lib/mysql && -d "$MYSQL_DATA_DIR" ]] &&
-       find "$MYSQL_DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit | grep -q . &&
+       directory_has_entries "$MYSQL_DATA_DIR" &&
        [[ "$(readlink -f /var/lib/mysql 2>/dev/null || true)" != \
           "$(readlink -f "$MYSQL_DATA_DIR" 2>/dev/null || true)" ]]; then
         fail "MYSQL_DATA_DIR (${MYSQL_DATA_DIR}) already contains data and is not the active MySQL data directory."
@@ -617,7 +621,7 @@ print_summary() {
     printf 'Nginx version: %s\nPHP version:   %s\nMySQL version: %s\n' "$NGINX_VERSION" "$PHP_VERSION" "$MYSQL_VERSION"
     printf 'Default web:  %s\nMySQL data:   %s\n' "$DEFAULT_WEB_ROOT" "$MYSQL_DATA_DIR"
     printf 'Certificates: /usr/local/nginx/conf/ssl/\n'
-    printf 'Management:   lnmp {start|stop|reload|restart|status|vhost|database|ssl|dnsssl}\n'
+    printf 'Management:   lnmp {start|stop|reload|restart|status|vhost|ssl|dnsssl}\n'
 }
 
 main() {

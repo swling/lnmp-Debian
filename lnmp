@@ -17,10 +17,8 @@ REWRITE_DIR="${NGINX_CONF}/rewrite"
 WEB_ROOT="${WEB_ROOT:-/home/wwwroot}"
 DEFAULT_WEB_ROOT="${DEFAULT_WEB_ROOT:-${WEB_ROOT}/default}"
 NGINX_LOG_DIR="${NGINX_LOG_DIR:-/home/wwwlogs}"
-MYSQL_DATA_DIR="${MYSQL_DATA_DIR:-/var/lib/mysql}"
 ACME_HOME=/usr/local/acme.sh
 ACME_BIN="$(command -v acme.sh || true)"
-MYSQL_BIN=/usr/local/mysql/bin/mysql
 is_supported_php_version() {
     local major
     [[ "$1" =~ ^([0-9]+)\.[0-9]+$ ]] || return 1
@@ -60,9 +58,8 @@ Usage:
   lnmp {start|stop|reload|restart|kill|status}
   lnmp {nginx|mysql|mariadb|php-fpm} {start|stop|reload|restart|kill|status}
   lnmp vhost {add|list|del}
-  lnmp database {add|list|edit|del}
   lnmp addons {install|uninstall} <addon>
-  lnmp ssl add
+  lnmp ssl {add|auto-renew}
   lnmp {dnsssl|dns|onlyssl} {ali|cf|dp|he|gd|aws|namecheap|namesilo}
 EOF
 }
@@ -279,59 +276,6 @@ delete_vhost() {
     printf 'Domain config deleted. Website files were not removed: %s\n' "$domain"
 }
 
-mysql_query() {
-    [[ -x "$MYSQL_BIN" ]] || fail "MySQL client is unavailable."
-    "$MYSQL_BIN" --protocol=socket -uroot -p "$@"
-}
-
-valid_sql_identifier() {
-    [[ "$1" =~ ^[A-Za-z0-9_]+$ ]]
-}
-
-database_action() {
-    local action=$1 database username password escaped_password
-    case "$action" in
-        list)
-            mysql_query -NBe "SHOW DATABASES;"
-            ;;
-        add)
-            require_root
-            read -r -p "Database name: " database
-            read -r -p "Database user: " username
-            valid_sql_identifier "$database" && valid_sql_identifier "$username" ||
-                fail "Database and user names may contain only letters, digits, and underscores."
-            read -r -s -p "Database password: " password
-            printf '\n'
-            [[ -n "$password" ]] || fail "Database password cannot be empty."
-            escaped_password="${password//\'/\'\'}"
-            printf "CREATE DATABASE \`%s\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;\nCREATE USER '%s'@'localhost' IDENTIFIED BY '%s';\nGRANT ALL PRIVILEGES ON \`%s\`.* TO '%s'@'localhost';\nFLUSH PRIVILEGES;\n" \
-                "$database" "$username" "$escaped_password" "$database" "$username" |
-                mysql_query
-            printf 'Database and user created: %s\n' "$database"
-            ;;
-        edit)
-            require_root
-            read -r -p "Database user: " username
-            valid_sql_identifier "$username" || fail "Invalid database user."
-            read -r -s -p "New password: " password
-            printf '\n'
-            [[ -n "$password" ]] || fail "Database password cannot be empty."
-            escaped_password="${password//\'/\'\'}"
-            printf "ALTER USER '%s'@'localhost' IDENTIFIED BY '%s';\n" \
-                "$username" "$escaped_password" | mysql_query
-            printf 'Password changed for database user: %s\n' "$username"
-            ;;
-        del)
-            require_root
-            read -r -p "Database name: " database
-            valid_sql_identifier "$database" || fail "Invalid database name."
-            printf "DROP DATABASE \`%s\`;\n" "$database" | mysql_query
-            printf 'Database dropped: %s\n' "$database"
-            ;;
-        *) usage >&2; exit 2 ;;
-    esac
-}
-
 collect_cert_domains() {
     local name
     local -a additional_names
@@ -354,7 +298,7 @@ collect_email() {
 
 append_ssl_config() {
     local domain=$1 names=$2 cert=$3 key=$4 config="${VHOST_DIR}/${1}.conf"
-    local webroot rewrite backup
+    local webroot rewrite php_include backup
     [[ -f "$config" ]] || fail "Create the virtual host first: lnmp vhost add"
     if grep -Eq 'listen[[:space:]]+443' "$config"; then
         fail "An HTTPS server block already exists for $domain."
@@ -363,8 +307,11 @@ append_ssl_config() {
     [[ -n "$webroot" ]] || fail "Could not find a root directive in $config."
     rewrite="$(grep -m1 -E '^[[:space:]]*include[[:space:]]+rewrite/[^;]+;' "$config" || true)"
     rewrite="${rewrite:-include rewrite/none.conf;}"
+    # Reuse the HTTP block's PHP include so HTTPS keeps the same pathinfo mode.
+    php_include="$(grep -m1 -E '^[[:space:]]*include[[:space:]]+enable-php(-pathinfo)?\.conf;' "$config" || true)"
+    php_include="${php_include:-include enable-php.conf;}"
     backup="$(mktemp)"
-    cp "$config" "$backup"
+    cp -p "$config" "$backup"
     cat >> "$config" <<EOF
 
 server
@@ -381,7 +328,7 @@ server
     ssl_session_timeout 10m;
 
     ${rewrite}
-    include enable-php.conf;
+    ${php_include}
 
     location ~ /\\. {
         deny all;
@@ -399,12 +346,43 @@ EOF
     rm -f "$backup"
 }
 
+ensure_acme_renewal_timer() {
+    local service_file=/etc/systemd/system/lnmp-acme-renew.service
+    local timer_file=/etc/systemd/system/lnmp-acme-renew.timer
+    [[ "$ACME_BIN" == /* && "$ACME_BIN" != *[[:space:]]* ]] ||
+        fail "acme.sh must resolve to an absolute path without whitespace."
+    cat > "$service_file" <<EOF
+[Unit]
+Description=Renew LNMP ACME certificates
+
+[Service]
+Type=oneshot
+ExecStart=${ACME_BIN} --cron --home ${ACME_HOME}
+EOF
+    cat > "$timer_file" <<'EOF'
+[Unit]
+Description=Daily renewal check for LNMP ACME certificates
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+    chmod 0644 "$service_file" "$timer_file"
+    systemctl daemon-reload
+    systemctl enable --now lnmp-acme-renew.timer
+}
+
 issue_certificate() {
     local challenge=$1 provider=${2:-} ca=$3 webroot=${4:-}
     local name dns_plugin cert_dir cert key
     local -a domain_args additional_names
     [[ -n "$ACME_BIN" ]] || fail "acme.sh is missing; install the Debian package with apt."
     [[ -n "${CERT_EMAIL:-}" ]] || collect_email
+    ensure_acme_renewal_timer
     mkdir -p "$ACME_HOME" "$SSL_DIR"
     domain_args=(-d "$CERT_DOMAIN")
     read -r -a additional_names <<< "$CERT_MORE"
@@ -541,17 +519,21 @@ case "${1:-}" in
             *) usage >&2; exit 2 ;;
         esac
         ;;
-    database)
-        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
-        database_action "$2"
-        ;;
     addons)
         shift
         exec /usr/local/bin/addons.sh "$@"
         ;;
     ssl)
-        [[ "${2:-}" == add ]] || { usage >&2; exit 2; }
-        ssl_add
+        case "${2:-}" in
+            add) ssl_add ;;
+            auto-renew)
+                require_root
+                [[ -n "$ACME_BIN" ]] || fail "acme.sh is missing; install the Debian package with apt."
+                ensure_acme_renewal_timer
+                printf 'Automatic ACME renewal is enabled by lnmp-acme-renew.timer.\n'
+                ;;
+            *) usage >&2; exit 2 ;;
+        esac
         ;;
     dnsssl|dns)
         [[ $# -eq 2 ]] || { usage >&2; exit 2; }

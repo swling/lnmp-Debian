@@ -57,9 +57,8 @@ Debian 软件包保留其原生配置、程序和数据位置，并创建旧路�
 lnmp {start|stop|restart|reload|kill|status}
 lnmp {nginx|mysql|mariadb|php-fpm} {start|stop|restart|reload|kill|status}
 lnmp vhost {add|list|del}
-lnmp database {add|list|edit|del}
 lnmp addons {install|uninstall} <addon>
-lnmp ssl add
+lnmp ssl {add|auto-renew}
 lnmp dnsssl {ali|cf|dp|he|gd|aws|namecheap|namesilo}
 lnmp onlyssl {ali|cf|dp|he|gd|aws|namecheap|namesilo}
 ```
@@ -72,7 +71,13 @@ sudo ./sync-lnmp.sh
 
 默认同步本目录的 `lnmp` 文件；也可指定另一个脚本，例如 `sudo ./sync-lnmp.sh /path/to/lnmp.sh`。同步前会检查 Bash 语法，并更新 `/usr/local/bin/lnmp`；`/usr/bin/lnmp` 保持为指向它的链接。
 
-`lnmp ssl add` 支持自备证书、Let's Encrypt、BuyPass 和 ZeroSSL；证书与私钥使用旧版目录和命名规则。DNS-01 使用 Debian 的 `acme.sh` 包，需预先设置对应 DNS 服务商要求的 API 环境变量。管理命令不会自动删除网站文件。
+`lnmp` 只管理 MySQL 服务，不创建、修改或删除数据库及数据库用户；数据库内容由应用部署流程管理。`lnmp ssl add` 支持自备证书、Let's Encrypt、BuyPass 和 ZeroSSL；证书与私钥使用旧版目录和命名规则。通过 ACME 签发证书时会启用 `lnmp-acme-renew.timer`，每天调用 `acme.sh --cron` 检查续签；证书更新后执行 Nginx reload。已有 ACME 证书的服务器可运行 `sudo lnmp ssl auto-renew` 一次启用定时检查。DNS-01 使用 Debian 的 `acme.sh` 包，需预先设置对应 DNS 服务商要求的 API 环境变量。自备证书不由脚本续签。管理命令不会自动删除网站文件。
+
+可在服务器上确认它是否已启用及下次运行时间
+`systemctl status lnmp-acme-renew.timer`
+`systemctl list-timers lnmp-acme-renew.timer`
+查看运行记录：（日志由 systemd-journald 可调整总体大小，以自动清理）
+`journalctl -u lnmp-acme-renew.service`
 
 `kill` 命令映射为 systemd 的正常停止操作，不会对服务进程发送不可恢复的强制终止信号。
 
