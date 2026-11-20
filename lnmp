@@ -354,6 +354,8 @@ ensure_acme_renewal_timer() {
     cat > "$service_file" <<EOF
 [Unit]
 Description=Renew LNMP ACME certificates
+After=network-online.target nss-lookup.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
