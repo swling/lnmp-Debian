@@ -9,6 +9,7 @@ Icon?
 
 # IDE 和编辑器
 .vscode/
+.workbuddy/
 xcuserdata/
 DerivedData/
 *.xcworkspace
