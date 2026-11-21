@@ -10,13 +10,14 @@ elif [[ -r "${SCRIPT_DIR}/lnmp-debian.conf" ]]; then
     . "${SCRIPT_DIR}/lnmp-debian.conf"
 fi
 
-NGINX_CONF=/usr/local/nginx/conf
-VHOST_DIR="${NGINX_CONF}/vhost"
+NGINX_CONF=/etc/nginx
+VHOST_DIR="${NGINX_CONF}/sites-available"
+ENABLED_VHOST_DIR="${NGINX_CONF}/sites-enabled"
 SSL_DIR="${NGINX_CONF}/ssl"
 REWRITE_DIR="${NGINX_CONF}/rewrite"
 WEB_ROOT="${WEB_ROOT:-/home/wwwroot}"
 DEFAULT_WEB_ROOT="${DEFAULT_WEB_ROOT:-${WEB_ROOT}/default}"
-NGINX_LOG_DIR="${NGINX_LOG_DIR:-/home/wwwlogs}"
+NGINX_LOG_DIR="${NGINX_LOG_DIR:-/var/log/nginx}"
 ACME_HOME=/usr/local/acme.sh
 ACME_BIN="$(command -v acme.sh || true)"
 is_supported_php_version() {
@@ -74,7 +75,7 @@ require_root() {
 }
 
 require_nginx() {
-    [[ -x /usr/local/nginx/sbin/nginx && -d "$VHOST_DIR" ]] ||
+    [[ -x /usr/sbin/nginx && -d "$VHOST_DIR" && -d "$ENABLED_VHOST_DIR" ]] ||
         fail "LNMP Debian is not installed. Run lnmp-Debian/install.sh first."
 }
 
@@ -84,7 +85,7 @@ valid_domain() {
 
 reload_nginx() {
     printf 'Testing Nginx configuration...\n'
-    /usr/local/nginx/sbin/nginx -t
+    /usr/sbin/nginx -t
     printf 'Reloading Nginx...\n'
     systemctl reload nginx
     printf 'Nginx reloaded.\n'
@@ -139,7 +140,9 @@ service_bundle() {
 create_vhost_config() {
     local domain=$1 names=$2 webroot=$3 rewrite=$4 php_config=$5 ipv6_listen=$6 access_log=$7
     local config="${VHOST_DIR}/${domain}.conf"
-    [[ ! -e "$config" ]] || fail "Virtual host already exists: $domain"
+    local enabled_config="${ENABLED_VHOST_DIR}/${domain}.conf"
+    [[ ! -e "$config" && ! -L "$config" && ! -e "$enabled_config" && ! -L "$enabled_config" ]] ||
+        fail "Virtual host already exists: $domain"
     [[ "$webroot" == /* && "$webroot" =~ ^/[A-Za-z0-9_./-]+$ ]] ||
         fail "Web root must be an absolute path using only letters, digits, dot, underscore, slash, or hyphen."
     [[ "$rewrite" =~ ^[A-Za-z0-9_-]+$ ]] || fail "Invalid rewrite profile name."
@@ -164,7 +167,7 @@ server
     root ${webroot};
 
     include rewrite/${rewrite}.conf;
-    include ${php_config};
+    include snippets/${php_config};
 
     location ~* \.(gif|jpe?g|png|bmp|swf|ico|webp)$ {
         expires 30d;
@@ -185,7 +188,9 @@ server
     ${access_log}
 }
 EOF
+    ln -s "../sites-available/${domain}.conf" "$enabled_config"
     if ! reload_nginx; then
+        rm -f "$enabled_config"
         rm -f "$config"
         fail "Nginx rejected the new virtual host; its config was removed."
     fi
@@ -254,22 +259,28 @@ add_vhost() {
 list_vhosts() {
     require_nginx
     printf 'Nginx Virtualhost list:\n'
-    find "$VHOST_DIR" -maxdepth 1 -type f -name '*.conf' -print |
+    find "$ENABLED_VHOST_DIR" -maxdepth 1 -type l -name '*.conf' ! -name default.conf -print |
         sed 's#^.*/##; s/\.conf$//' | sort
 }
 
 delete_vhost() {
-    local domain backup
+    local domain backup config enabled_config
     require_root
     require_nginx
     list_vhosts
     read -r -p "Please enter domain you want to delete: " domain
     valid_domain "$domain" || fail "Invalid domain name."
-    [[ -f "${VHOST_DIR}/${domain}.conf" ]] || fail "Virtual host does not exist: $domain"
+    config="${VHOST_DIR}/${domain}.conf"
+    enabled_config="${ENABLED_VHOST_DIR}/${domain}.conf"
+    [[ -f "$config" ]] || fail "Virtual host does not exist: $domain"
+    [[ -L "$enabled_config" && "$(readlink -f "$enabled_config")" == "$(readlink -f "$config")" ]] ||
+        fail "Virtual host is not enabled through the Debian sites-enabled directory: $domain"
     backup="$(mktemp)"
-    mv -- "${VHOST_DIR}/${domain}.conf" "$backup"
+    mv -- "$config" "$backup"
+    rm -- "$enabled_config"
     if ! reload_nginx; then
-        mv "$backup" "${VHOST_DIR}/${domain}.conf"
+        mv "$backup" "$config"
+        ln -s "../sites-available/${domain}.conf" "$enabled_config"
         fail "Nginx rejected the change; the virtual host config was restored."
     fi
     rm -f "$backup"
@@ -308,8 +319,8 @@ append_ssl_config() {
     rewrite="$(grep -m1 -E '^[[:space:]]*include[[:space:]]+rewrite/[^;]+;' "$config" || true)"
     rewrite="${rewrite:-include rewrite/none.conf;}"
     # Reuse the HTTP block's PHP include so HTTPS keeps the same pathinfo mode.
-    php_include="$(grep -m1 -E '^[[:space:]]*include[[:space:]]+enable-php(-pathinfo)?\.conf;' "$config" || true)"
-    php_include="${php_include:-include enable-php.conf;}"
+    php_include="$(grep -m1 -E '^[[:space:]]*include[[:space:]]+snippets/enable-php(-pathinfo)?\.conf;' "$config" || true)"
+    php_include="${php_include:-include snippets/enable-php.conf;}"
     backup="$(mktemp)"
     cp -p "$config" "$backup"
     cat >> "$config" <<EOF
@@ -335,7 +346,7 @@ server
     }
 }
 EOF
-    if ! /usr/local/nginx/sbin/nginx -t; then
+    if ! /usr/sbin/nginx -t; then
         mv "$backup" "$config"
         fail "Nginx rejected the HTTPS config; the previous virtual host config was restored."
     fi

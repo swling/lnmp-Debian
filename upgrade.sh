@@ -258,7 +258,7 @@ upgrade_php() {
     local extension_dir php_api php_ini marker_file service_file service_tmp socket socket_owner
     local old_service_tmp previous_prefix previous_service
     local old_service_was_active=0 old_service_was_enabled=0
-    local make_jobs package old_php_link old_fpm_link
+    local make_jobs package
     if [[ -z "$requested" && -t 0 ]]; then
         read -r -p "PHP version from php.net (example: 8.4.17): " requested
     fi
@@ -283,7 +283,22 @@ upgrade_php() {
     [[ ! -e "$build_root" ]] || fail "PHP build directory already exists: $build_root"
     php_ini="/etc/php/${php_version}/fpm/php.ini"
     [[ -s "$php_ini" ]] || fail "PHP-FPM configuration file not found: $php_ini"
-    current_version="$(/usr/local/php/bin/php -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+    marker_file=/etc/lnmp-debian/php-upstream-service
+    previous_prefix=
+    previous_service=
+    if [[ -r "$marker_file" ]]; then
+        IFS= read -r previous_service < "$marker_file" || true
+        [[ "$previous_service" == lnmp-php-upstream ]] ||
+            fail "Unknown PHP upstream service marker: $previous_service"
+        if [[ -r /etc/lnmp-debian/php-upstream-prefix ]]; then
+            IFS= read -r previous_prefix < /etc/lnmp-debian/php-upstream-prefix || true
+        fi
+        [[ -n "$previous_prefix" && -x "${previous_prefix}/bin/php" ]] ||
+            fail "Previous upstream PHP binary is missing; refusing to replace the active runtime."
+        current_version="$("${previous_prefix}/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+    else
+        current_version="$(/usr/bin/php"${php_version}" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+    fi
     [[ "$current_version" =~ ^8\.[0-9]+\.[0-9]+$ ]] ||
         fail "Could not determine the current PHP version."
     dpkg --compare-versions "$requested" gt "$current_version" ||
@@ -341,10 +356,7 @@ EOF
         fail "The PHP source build is missing the required opcache module."
     "${prefix}/sbin/php-fpm" -t -y "/etc/php/${php_version}/fpm/php-fpm.conf"
 
-    marker_file=/etc/lnmp-debian/php-upstream-service
     service_file=/etc/systemd/system/lnmp-php-upstream.service
-    previous_prefix=
-    previous_service=
     old_service_was_active=0
     if [[ -r "$marker_file" ]]; then
         IFS= read -r previous_service < "$marker_file" || true
@@ -362,12 +374,6 @@ EOF
         systemctl is-active --quiet "php${php_version}-fpm" && old_service_was_active=1
         systemctl is-enabled --quiet "php${php_version}-fpm" && old_service_was_enabled=1
     fi
-    [[ -L /usr/local/php/bin/php ]] ||
-        fail "/usr/local/php/bin/php is not a symlink; refusing to replace it."
-    [[ -L /usr/local/php/sbin/php-fpm ]] ||
-        fail "/usr/local/php/sbin/php-fpm is not a symlink; refusing to replace it."
-    old_php_link="$(readlink /usr/local/php/bin/php)"
-    old_fpm_link="$(readlink /usr/local/php/sbin/php-fpm)"
     service_tmp="$(mktemp "${service_file}.XXXXXX")"
     old_service_tmp="$(mktemp)"
     if [[ -n "$previous_service" ]]; then
@@ -392,8 +398,6 @@ EOF
     install_php_management_updates
     install -m 0644 "$service_tmp" "$service_file"
     rm -f "$service_tmp"
-    ln -sfn "${prefix}/bin/php" /usr/local/php/bin/php
-    ln -sfn "${prefix}/sbin/php-fpm" /usr/local/php/sbin/php-fpm
     install -d -m 0755 /etc/lnmp-debian
     printf '%s\n' lnmp-php-upstream > "$marker_file"
     printf '%s\n' "$prefix" > /etc/lnmp-debian/php-upstream-prefix
@@ -401,8 +405,6 @@ EOF
 
     if [[ "$old_service_was_active" -eq 1 ]]; then
         if ! systemctl stop "${previous_service:-php${php_version}-fpm}"; then
-            ln -sfn "$old_php_link" /usr/local/php/bin/php
-            ln -sfn "$old_fpm_link" /usr/local/php/sbin/php-fpm
             if [[ -n "$previous_service" ]]; then
                 install -m 0644 "$old_service_tmp" "$service_file"
             else
@@ -423,8 +425,6 @@ EOF
     fi
     if [[ -z "$previous_service" ]]; then
         systemctl disable "php${php_version}-fpm" || {
-            ln -sfn "$old_php_link" /usr/local/php/bin/php
-            ln -sfn "$old_fpm_link" /usr/local/php/sbin/php-fpm
             rm -f "$marker_file" /etc/lnmp-debian/php-upstream-prefix "$service_file"
             systemctl daemon-reload
             if [[ "$old_service_was_enabled" -eq 1 ]]; then
@@ -441,8 +441,6 @@ EOF
         if ! systemctl disable --now lnmp-php-upstream.service; then
             printf 'Warning: failed to stop the new PHP-FPM service during rollback.\n' >&2
         fi
-        ln -sfn "$old_php_link" /usr/local/php/bin/php
-        ln -sfn "$old_fpm_link" /usr/local/php/sbin/php-fpm
         if [[ -n "$previous_service" ]]; then
             install -m 0644 "$old_service_tmp" "$service_file"
             printf '%s\n' "$previous_service" > "$marker_file"
@@ -506,7 +504,7 @@ backup_mysql_data() {
 
 upgrade_mysql() {
     local requested=$1 version current_version target_release
-    [[ -x /usr/local/mysql/bin/mysql ]] || fail "MySQL client not found at /usr/local/mysql/bin/mysql."
+    [[ -x /usr/bin/mysql ]] || fail "MySQL client not found at /usr/bin/mysql."
     grep -Fq 'repo.mysql.com/apt/debian' /etc/apt/sources.list.d/mysql.list ||
         fail "Oracle MySQL APT repository is not configured; run install.sh first."
     [[ -r /usr/share/keyrings/mysql-apt.gpg ]] ||
@@ -524,7 +522,7 @@ upgrade_mysql() {
     run_confirmed_install "mysql-server=${version}"
     systemctl restart mysql
     systemctl is-active --quiet mysql || fail "MySQL is not active after the upgrade."
-    /usr/local/mysql/bin/mysql --version
+    /usr/bin/mysql --version
     printf 'MySQL upgraded to APT version %s.\n' "$version"
 }
 

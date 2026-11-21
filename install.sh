@@ -16,12 +16,14 @@ fi
 
 WEB_ROOT="${WEB_ROOT:-/home/wwwroot}"
 DEFAULT_WEB_ROOT="${DEFAULT_WEB_ROOT:-${WEB_ROOT}/default}"
-NGINX_LOG_DIR="${NGINX_LOG_DIR:-/home/wwwlogs}"
+NGINX_LOG_DIR="${NGINX_LOG_DIR:-/var/log/nginx}"
 MYSQL_DATA_DIR="${MYSQL_DATA_DIR:-/var/lib/mysql}"
 PHP_VERSION="${PHP_VERSION:-}"
 NGINX_VERSION="${NGINX_VERSION:-}"
 MYSQL_VERSION="${MYSQL_VERSION:-}"
-REWRITE_DIR=/usr/local/nginx/conf/rewrite
+NGINX_CONFIG_DIR=/etc/nginx
+NGINX_SNIPPET_DIR="${NGINX_CONFIG_DIR}/snippets"
+REWRITE_DIR="${NGINX_CONFIG_DIR}/rewrite"
 
 usage() {
     cat <<'EOF'
@@ -151,49 +153,6 @@ select_php_version() {
     fi
 }
 
-link_compat_path() {
-    local target=$1 link=$2 resolved_target resolved_link
-    if [[ -L "$link" ]]; then
-        resolved_target="$(readlink -f "$target" 2>/dev/null || true)"
-        resolved_link="$(readlink -f "$link" 2>/dev/null || true)"
-        [[ -n "$resolved_target" && "$resolved_link" == "$resolved_target" ]] ||
-            fail "Compatibility path already points elsewhere: $link"
-    elif [[ -e "$link" ]]; then
-        fail "Refusing to replace existing path: $link"
-    else
-        ln -s "$target" "$link"
-    fi
-}
-
-create_bin_link() {
-    local target=$1 link=$2
-    [[ -x "$target" ]] || return 0
-    if [[ -L "$link" ]]; then
-        [[ "$(readlink -f "$link")" == "$(readlink -f "$target")" ]] ||
-            fail "Compatibility path already points elsewhere: $link"
-    elif [[ -e "$link" ]]; then
-        fail "Refusing to replace existing path: $link"
-    else
-        ln -s "$target" "$link"
-    fi
-}
-
-check_compat_path() {
-    local path=$1 expected=$2 actual
-    if [[ ! -e "$path" && ! -L "$path" ]]; then
-        return
-    fi
-    [[ -L "$path" ]] || fail "Existing custom LNMP path detected ($path); migrate or back it up before installing."
-    actual="$(readlink -f "$path" 2>/dev/null || true)"
-    if [[ "$expected" == php-fpm ]]; then
-        [[ "$actual" =~ ^/etc/php/[0-9]+\.[0-9]+/fpm$ ]] ||
-            fail "Existing custom LNMP path detected ($path); migrate or back it up before installing."
-    else
-        [[ "$actual" == "$(readlink -f "$expected")" ]] ||
-            fail "Existing custom LNMP path detected ($path); migrate or back it up before installing."
-    fi
-}
-
 install_mysql_repository() {
     local codename architecture key_tmp key_fingerprint
     codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")"
@@ -257,10 +216,6 @@ validate_configuration_and_existing_data() {
     [[ "$MYSQL_DATA_DIR" != / ]] || fail "MYSQL_DATA_DIR must not be the filesystem root."
     [[ "$MYSQL_DATA_DIR" != /var/lib/mysql/* && /var/lib/mysql != "$MYSQL_DATA_DIR"/* ]] ||
         fail "MYSQL_DATA_DIR must not be nested inside or above /var/lib/mysql."
-
-    check_compat_path /usr/local/nginx/conf /etc/nginx
-    check_compat_path /usr/local/php/etc php-fpm
-    check_compat_path /usr/local/mysql/var "$MYSQL_DATA_DIR"
 
     local mariadb_status mysql_community_status
     mariadb_status="$(dpkg-query -W -f='${db:Status-Status}' mariadb-server 2>/dev/null || true)"
@@ -393,17 +348,10 @@ ensure_web_user() {
     fi
 }
 
-create_compatibility_layout() {
-    local binary
-    mkdir -p /usr/local/nginx /usr/local/php/var /usr/local/mysql /run/php
-    link_compat_path /etc/nginx /usr/local/nginx/conf
-    link_compat_path "/etc/php/${PHP_VERSION}/fpm" /usr/local/php/etc
-    link_compat_path /run/php /usr/local/php/var/run
-    link_compat_path /var/log/nginx /usr/local/nginx/logs
-    link_compat_path "$MYSQL_DATA_DIR" /usr/local/mysql/var
-    mkdir -p /usr/local/nginx/sbin /usr/local/php/bin /usr/local/php/sbin \
-        /usr/local/mysql/bin /usr/local/nginx/conf/vhost \
-        "$REWRITE_DIR" /usr/local/nginx/conf/ssl /run/php
+prepare_debian_layout() {
+    mkdir -p "$NGINX_SNIPPET_DIR" "$REWRITE_DIR" \
+        "${NGINX_CONFIG_DIR}/ssl" "${NGINX_CONFIG_DIR}/sites-available" \
+        "${NGINX_CONFIG_DIR}/sites-enabled" /run/php
     if [[ ! -d "$WEB_ROOT" ]]; then
         mkdir -p "$WEB_ROOT"
         chown www:www "$WEB_ROOT"
@@ -412,33 +360,18 @@ create_compatibility_layout() {
         mkdir -p "$DEFAULT_WEB_ROOT"
         chown www:www "$DEFAULT_WEB_ROOT"
     fi
-    if [[ ! -d "$NGINX_LOG_DIR" ]]; then
+    if [[ "$NGINX_LOG_DIR" == /var/log/nginx ]]; then
+        install -d -m 0755 "$NGINX_LOG_DIR"
+    elif [[ ! -d "$NGINX_LOG_DIR" ]]; then
         mkdir -p "$NGINX_LOG_DIR"
         chown www:www "$NGINX_LOG_DIR"
-    fi
-
-    create_bin_link /usr/sbin/nginx /usr/local/nginx/sbin/nginx
-    create_bin_link "/usr/bin/php${PHP_VERSION}" /usr/local/php/bin/php
-    create_bin_link "/usr/sbin/php-fpm${PHP_VERSION}" /usr/local/php/sbin/php-fpm
-    for binary in mysql mysqldump mysqladmin mysqlcheck mysql_config mysqld mysqld_safe; do
-        create_bin_link "/usr/bin/${binary}" "/usr/local/mysql/bin/${binary}"
-    done
-
-    if [[ ! -e /etc/my.cnf && ! -L /etc/my.cnf ]]; then
-        : > /etc/mysql/conf.d/lnmp-legacy.cnf
-        ln -s /etc/mysql/conf.d/lnmp-legacy.cnf /etc/my.cnf
-    elif [[ "$(readlink -f /etc/my.cnf 2>/dev/null || true)" != /etc/mysql/my.cnf &&
-            "$(readlink -f /etc/my.cnf 2>/dev/null || true)" != /etc/mysql/conf.d/lnmp-legacy.cnf ]]; then
-        cat > /etc/mysql/conf.d/lnmp-legacy.cnf <<'EOF'
-!include /etc/my.cnf
-EOF
     fi
 }
 
 configure_nginx() {
     local rewrite_template rewrite_name rewrite_file
-    if [[ ! -e /usr/local/nginx/conf/enable-php.conf ]]; then
-        cat > /usr/local/nginx/conf/enable-php.conf <<EOF
+    if [[ ! -e "${NGINX_SNIPPET_DIR}/enable-php.conf" ]]; then
+        cat > "${NGINX_SNIPPET_DIR}/enable-php.conf" <<EOF
 location ~ [^/]\.php(/|$)
 {
     try_files \$uri =404;
@@ -448,26 +381,19 @@ location ~ [^/]\.php(/|$)
 }
 EOF
     fi
-    if [[ ! -e /usr/local/nginx/conf/enable-php-pathinfo.conf ]]; then
-        cat > /usr/local/nginx/conf/enable-php-pathinfo.conf <<EOF
+    if [[ ! -e "${NGINX_SNIPPET_DIR}/enable-php-pathinfo.conf" ]]; then
+        cat > "${NGINX_SNIPPET_DIR}/enable-php-pathinfo.conf" <<EOF
 location ~ [^/]\.php(/|$)
 {
     fastcgi_pass unix:/run/php/php${PHP_VERSION}-fpm.sock;
     fastcgi_index index.php;
     include fastcgi.conf;
-    include pathinfo.conf;
+    include snippets/pathinfo.conf;
 }
 EOF
     fi
-    if [[ ! -e "/usr/local/nginx/conf/enable-php${PHP_VERSION}.conf" ]]; then
-        ln -s enable-php.conf "/usr/local/nginx/conf/enable-php${PHP_VERSION}.conf"
-    fi
-    if [[ ! -e "/usr/local/nginx/conf/enable-php${PHP_VERSION}-pathinfo.conf" ]]; then
-        ln -s enable-php-pathinfo.conf \
-            "/usr/local/nginx/conf/enable-php${PHP_VERSION}-pathinfo.conf"
-    fi
-    if [[ ! -e /usr/local/nginx/conf/pathinfo.conf ]]; then
-        cat > /usr/local/nginx/conf/pathinfo.conf <<'EOF'
+    if [[ ! -e "${NGINX_SNIPPET_DIR}/pathinfo.conf" ]]; then
+        cat > "${NGINX_SNIPPET_DIR}/pathinfo.conf" <<'EOF'
 if (!-e $request_filename) {
     rewrite ^(.*)$ /index.php$1 last;
 }
@@ -488,24 +414,15 @@ EOF
             : > "${REWRITE_DIR}/${rewrite_file}.conf"
         fi
     done
-    if [[ ! -e /usr/local/nginx/conf/conf.d/lnmp-debian-vhosts.conf ]]; then
-        cat > /usr/local/nginx/conf/conf.d/lnmp-debian-vhosts.conf <<'EOF'
-include /usr/local/nginx/conf/vhost/*.conf;
-EOF
-    elif ! grep -Fq 'include /usr/local/nginx/conf/vhost/*.conf;' \
-            /usr/local/nginx/conf/conf.d/lnmp-debian-vhosts.conf; then
-        fail "Conflicting Nginx include file: /usr/local/nginx/conf/conf.d/lnmp-debian-vhosts.conf"
-    fi
-
     local nginx_conf nginx_default_available nginx_default_enabled nginx_default_template nginx_default_temp
-    nginx_conf=/etc/nginx/nginx.conf
+    nginx_conf="${NGINX_CONFIG_DIR}/nginx.conf"
     if [[ -f "$nginx_conf" ]]; then
         cp -n "$nginx_conf" "${nginx_conf}.lnmp-debian.orig"
         sed -i -E 's/^[[:space:]]*user[[:space:]]+www-data;/user www;/' "$nginx_conf"
     fi
 
-    nginx_default_available=/etc/nginx/sites-available/default
-    nginx_default_enabled=/etc/nginx/sites-enabled/default
+    nginx_default_available="${NGINX_CONFIG_DIR}/sites-available/default"
+    nginx_default_enabled="${NGINX_CONFIG_DIR}/sites-enabled/default"
     nginx_default_template="$SCRIPT_DIR/conf/default-site.conf"
     [[ -s "$nginx_default_template" ]] ||
         fail "Default Nginx site template is missing: ${nginx_default_template}"
@@ -536,14 +453,6 @@ EOF
 
 configure_php_fpm() {
     local pool_conf fpm_conf
-    if [[ ! -e /etc/init.d/php-fpm ]]; then
-        cat > /etc/init.d/php-fpm <<EOF
-#!/bin/sh
-exec /etc/init.d/${PHP_FPM_SERVICE} "\$@"
-EOF
-        chmod 0755 /etc/init.d/php-fpm
-    fi
-
     pool_conf="/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
     cp -n "$pool_conf" "${pool_conf}.lnmp-debian.orig"
     sed -i -E \
@@ -597,7 +506,7 @@ install_management_commands() {
 
 start_and_verify_services() {
     local php_fpm_socket php_fpm_socket_owner
-    nginx -t
+    /usr/sbin/nginx -t
     systemctl daemon-reload
     systemctl enable --now nginx "$PHP_FPM_SERVICE" mysql
     systemctl restart "$PHP_FPM_SERVICE" ||
@@ -616,11 +525,11 @@ start_and_verify_services() {
 
 print_summary() {
     printf '\nLNMP Debian installation completed.\n'
-    printf 'Nginx config: /usr/local/nginx/conf/nginx.conf -> /etc/nginx/nginx.conf\n'
-    printf 'PHP config:   /usr/local/php/etc/php.ini -> /etc/php/%s/fpm/php.ini\n' "$PHP_VERSION"
+    printf 'Nginx config: /etc/nginx/nginx.conf\n'
+    printf 'PHP config:   /etc/php/%s/fpm/php.ini\n' "$PHP_VERSION"
     printf 'Nginx version: %s\nPHP version:   %s\nMySQL version: %s\n' "$NGINX_VERSION" "$PHP_VERSION" "$MYSQL_VERSION"
     printf 'Default web:  %s\nMySQL data:   %s\n' "$DEFAULT_WEB_ROOT" "$MYSQL_DATA_DIR"
-    printf 'Certificates: /usr/local/nginx/conf/ssl/\n'
+    printf 'Certificates: /etc/nginx/ssl/\n'
     printf 'Management:   lnmp {start|stop|reload|restart|status|vhost|ssl|dnsssl}\n'
 }
 
@@ -633,7 +542,7 @@ main() {
     install_packages
     configure_mysql_data_directory
     ensure_web_user
-    create_compatibility_layout
+    prepare_debian_layout
     configure_nginx
     configure_php_fpm
     install_management_commands
