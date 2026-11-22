@@ -108,7 +108,17 @@ prepare_addon() {
             ADDON_PACKAGES=(memcached "php${PHP_VERSION}-memcached")
             ADDON_SERVICES=(memcached)
             ;;
-        opcache) ADDON_PACKAGES=("php${PHP_VERSION}-opcache") ;;
+        opcache)
+            # OPcache became part of the PHP core in 8.5; sury no longer ships
+            # a separate php8.5-opcache (or later) package.
+            if dpkg --compare-versions "$PHP_VERSION" ge 8.5; then
+                printf 'OPcache is built into PHP %s and always available; no package is needed.\n' \
+                    "$PHP_VERSION"
+                ADDON_PACKAGES=()
+            else
+                ADDON_PACKAGES=("php${PHP_VERSION}-opcache")
+            fi
+            ;;
         redis)
             ADDON_PACKAGES=(redis-server "php${PHP_VERSION}-redis")
             ADDON_SERVICES=(redis-server)
@@ -168,6 +178,7 @@ addon_action() {
     require_root
     require_php
     prepare_addon "$addon"
+    ((${#ADDON_PACKAGES[@]} > 0)) || return
 
     if [[ "$action" == uninstall && "$addon" =~ ^(exif|fileinfo|sodium)$ ]]; then
         printf '%s is part of php%s-common and cannot be removed independently.\n' \

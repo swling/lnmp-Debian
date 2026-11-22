@@ -4,6 +4,16 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MYSQL_KEYRING=/usr/share/keyrings/mysql-apt.gpg
 MYSQL_SOURCE=/etc/apt/sources.list.d/mysql.list
+MYSQL_REPO_URL=https://repo.mysql.com/apt/debian
+MYSQL_COMPONENTS=
+MYSQL_COMPONENT=
+MYSQL_CODENAME=
+MYSQL_ARCHITECTURE=
+NGINX_KEY_URL=https://nginx.org/keys/nginx_signing.key
+NGINX_KEYRING=/usr/share/keyrings/nginx-archive-keyring.gpg
+NGINX_SOURCE=/etc/apt/sources.list.d/nginx.list
+NGINX_PIN=/etc/apt/preferences.d/99nginx
+NGINX_REPO_BASE=https://nginx.org/packages
 SYSTEM_CONFIG=/etc/lnmp-debian.conf
 
 if [[ -r "$SYSTEM_CONFIG" ]]; then
@@ -20,6 +30,7 @@ NGINX_LOG_DIR="${NGINX_LOG_DIR:-/var/log/nginx}"
 MYSQL_DATA_DIR="${MYSQL_DATA_DIR:-/var/lib/mysql}"
 PHP_VERSION="${PHP_VERSION:-}"
 NGINX_VERSION="${NGINX_VERSION:-}"
+NGINX_CHANNEL="${NGINX_CHANNEL:-stable}"
 MYSQL_VERSION="${MYSQL_VERSION:-}"
 NGINX_CONFIG_DIR=/etc/nginx
 NGINX_SNIPPET_DIR="${NGINX_CONFIG_DIR}/snippets"
@@ -30,9 +41,14 @@ usage() {
 Usage: install.sh
 
 Install the LNMP Debian profile on Debian 13 or later:
-  Nginx and PHP: Debian APT repositories
-  MySQL: Oracle MySQL 8.4 LTS APT repository
+  Nginx: nginx.org official APT repository (stable or mainline channel)
+  PHP: Debian APT repositories
+  MySQL: Oracle MySQL APT repository (server components discovered dynamically)
   ACME client: Debian APT repository
+
+Nginx and MySQL are installed from their official APT repositories. PHP uses
+Debian packages at install time; use upgrade.sh with sury to move to a newer
+PHP branch later.
 EOF
 }
 
@@ -42,16 +58,23 @@ fail() {
 }
 
 list_package_versions() {
-    apt-cache madison "$1" |
-        awk -F'|' '{ gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); if ($2 != "") print $2 }' |
+    local package=$1 origin=${2:-}
+    apt-cache madison "$package" |
+        awk -F'|' -v origin="$origin" '
+            {
+                repository = tolower($3)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+                if ($2 != "" && (origin == "" || index(repository, tolower(origin))))
+                    print $2
+            }' |
         sort -Vu
 }
 
 select_package_version() {
-    local label=$1 package=$2 configured=${3:-} minimum_major=${4:-0}
+    local label=$1 package=$2 configured=${3:-} minimum_major=${4:-0} origin=${5:-}
     local choice index default_index version major marker
     local -a versions available_versions
-    mapfile -t available_versions < <(list_package_versions "$package")
+    mapfile -t available_versions < <(list_package_versions "$package" "$origin")
     versions=()
     for version in "${available_versions[@]}"; do
         major="${version#*:}"
@@ -94,6 +117,112 @@ select_package_version() {
     else
         fail "Invalid ${label} version selection: ${choice}"
     fi
+}
+
+select_mysql_version() {
+    local choice index candidate marker kind version source major
+    local -a raw_lines versions sources is_lts
+
+    # madison's third column carries the originating component, which is how
+    # LTS and innovation releases are told apart and how the source is pinned.
+    mapfile -t raw_lines < <(
+        apt-cache madison mysql-server |
+            awk -F'|' '{
+                v = $2; s = $3;
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", v);
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", s);
+                if (v != "") print v "\t" s
+            }' |
+            sort -t $'\t' -k1,1V -u
+    )
+
+    versions=()
+    sources=()
+    is_lts=()
+    for candidate in "${raw_lines[@]}"; do
+        version="${candidate%%$'\t'*}"
+        source="${candidate#*$'\t'}"
+        major="${version#*:}"
+        major="${major%%.*}"
+        [[ "$major" =~ ^[0-9]+$ ]] || continue
+        (( major >= 8 )) || continue
+        versions+=("$version")
+        sources+=("$source")
+        if [[ "$source" == *-lts* ]]; then
+            is_lts+=(1)
+        else
+            is_lts+=(0)
+        fi
+    done
+    ((${#versions[@]} > 0)) ||
+        fail "No MySQL 8+ versions are available from the Oracle APT repository."
+
+    # Versions are sorted ascending, so the last LTS entry is the newest LTS.
+    # Fall back to the newest version when no LTS component is available.
+    default_index=-1
+    for index in "${!versions[@]}"; do
+        (( is_lts[index] )) && default_index=$index
+    done
+    (( default_index >= 0 )) || default_index=$((${#versions[@]} - 1))
+
+    if [[ -n "$MYSQL_VERSION" ]]; then
+        for index in "${!versions[@]}"; do
+            if [[ "${versions[index]}" == "$MYSQL_VERSION" ]]; then
+                default_index=$index
+                break
+            fi
+        done
+        [[ "${versions[default_index]}" == "$MYSQL_VERSION" ]] ||
+            fail "MySQL version ${MYSQL_VERSION} is not available from the Oracle APT repository."
+    fi
+
+    printf '\nAvailable MySQL versions:\n'
+    for index in "${!versions[@]}"; do
+        marker=
+        [[ "$index" -eq "$default_index" ]] && marker=' [default]'
+        kind=innovation
+        (( is_lts[index] )) && kind=LTS
+        printf '  %d) %s (%s)%s\n' "$((index + 1))" "${versions[index]}" "$kind" "$marker"
+    done
+
+    if [[ -t 0 ]]; then
+        read -r -p "Select version [${versions[default_index]}]: " choice
+    else
+        choice=
+    fi
+    if [[ -z "$choice" ]]; then
+        index=$default_index
+    elif [[ "$choice" =~ ^[0-9]+$ ]] &&
+         (( choice >= 1 && choice <= ${#versions[@]} )); then
+        index=$((choice - 1))
+    elif [[ " ${versions[*]} " == *" ${choice} "* ]]; then
+        index=-1
+        for candidate in "${!versions[@]}"; do
+            if [[ "${versions[candidate]}" == "$choice" ]]; then
+                index=$candidate
+                break
+            fi
+        done
+    else
+        fail "Invalid MySQL version selection: ${choice}"
+    fi
+
+    MYSQL_VERSION="${versions[index]}"
+    source="${sources[index]}"
+    if [[ "$source" =~ (mysql-[a-zA-Z0-9][a-zA-Z0-9.-]*) ]]; then
+        MYSQL_COMPONENT="${BASH_REMATCH[1]}"
+    else
+        fail "Could not determine the APT component for MySQL ${MYSQL_VERSION}."
+    fi
+}
+
+finalize_mysql_repository() {
+    [[ -n "$MYSQL_COMPONENT" ]] ||
+        fail "No MySQL component was selected; refusing to configure the APT source."
+    # A single component avoids mixing mysql-common / libmysqlclient versions
+    # from different series while resolving the pinned mysql-server version.
+    write_mysql_source "$MYSQL_COMPONENT"
+    apt-get update
 }
 
 select_php_version() {
@@ -153,13 +282,49 @@ select_php_version() {
     fi
 }
 
+discover_mysql_components() {
+    local components
+    components="$(
+        curl --fail --silent --show-error --location \
+            "${MYSQL_REPO_URL}/dists/${MYSQL_CODENAME}/Release" |
+            awk -F': *' '$1 == "Components" { print $2; exit }' |
+            tr ' ' '\n' |
+            awk '
+                /^mysql-/ &&
+                !/^mysql-apt-config$/ &&
+                !/^mysql-cluster-/ &&
+                !/^mysql-tools/ &&
+                !/-dbg$/ { print }
+            ' |
+            paste -sd' ' -
+    )"
+    [[ -n "$components" ]] ||
+        fail "Could not discover MySQL server components from ${MYSQL_REPO_URL} for ${MYSQL_CODENAME}."
+    printf '%s' "$components"
+}
+
+write_mysql_source() {
+    local components=$1 source_tmp
+    install -d -m 0755 "$(dirname "$MYSQL_SOURCE")"
+    source_tmp="$(mktemp "${MYSQL_SOURCE}.XXXXXX")"
+    printf 'deb [arch=%s signed-by=%s] %s/ %s %s\n' \
+        "$MYSQL_ARCHITECTURE" "$MYSQL_KEYRING" "$MYSQL_REPO_URL" \
+        "$MYSQL_CODENAME" "$components" > "$source_tmp"
+    chmod 0644 "$source_tmp"
+    mv "$source_tmp" "$MYSQL_SOURCE"
+}
+
 install_mysql_repository() {
-    local codename architecture key_tmp key_fingerprint
-    codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")"
-    architecture="$(dpkg --print-architecture)"
-    [[ "$architecture" == amd64 ]] ||
-        fail "Oracle MySQL's Debian 13 APT repository currently supports amd64 only (found: $architecture)."
-    [[ -n "$codename" ]] || fail "Could not determine Debian release codename."
+    local key_tmp key_fingerprint
+    MYSQL_CODENAME="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")"
+    MYSQL_ARCHITECTURE="$(dpkg --print-architecture)"
+    [[ "$MYSQL_ARCHITECTURE" == amd64 ]] ||
+        fail "Oracle MySQL's Debian 13 APT repository currently supports amd64 only (found: $MYSQL_ARCHITECTURE)."
+    [[ -n "$MYSQL_CODENAME" ]] || fail "Could not determine Debian release codename."
+
+    # Keep every server component enabled during discovery so the version menu
+    # can offer all MySQL series the repository currently publishes.
+    MYSQL_COMPONENTS="$(discover_mysql_components)"
 
     install -d -m 0755 /usr/share/keyrings
     key_tmp="$(mktemp)"
@@ -172,10 +337,63 @@ install_mysql_repository() {
         fail "Unexpected Oracle MySQL repository signing key fingerprint: ${key_fingerprint:-unreadable}"
     gpg --dearmor --yes --output "$MYSQL_KEYRING" "$key_tmp"
     chmod 0644 "$MYSQL_KEYRING"
-    printf 'deb [arch=%s signed-by=%s] https://repo.mysql.com/apt/debian/ %s mysql-8.4-lts\n' \
-        "$architecture" "$MYSQL_KEYRING" "$codename" > "$MYSQL_SOURCE"
+    write_mysql_source "$MYSQL_COMPONENTS"
+    printf 'Discovered MySQL components: %s\n' "$MYSQL_COMPONENTS"
     rm -f "$key_tmp"
     trap - RETURN
+}
+
+install_nginx_repository() {
+    local codename channel_url key_tmp keyring_tmp source_tmp pin_tmp fingerprint
+
+    [[ "$NGINX_CHANNEL" == stable || "$NGINX_CHANNEL" == mainline ]] ||
+        fail "NGINX_CHANNEL must be stable or mainline (found: ${NGINX_CHANNEL})."
+    codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")"
+    [[ -n "$codename" ]] || fail "Could not determine Debian release codename."
+    case "$NGINX_CHANNEL" in
+        stable) channel_url="${NGINX_REPO_BASE}/debian" ;;
+        mainline) channel_url="${NGINX_REPO_BASE}/mainline/debian" ;;
+    esac
+
+    if [[ -e "$NGINX_SOURCE" ]] &&
+       ! grep -Fq 'https://nginx.org/packages/' "$NGINX_SOURCE"; then
+        fail "Refusing to overwrite an unrelated APT source: $NGINX_SOURCE"
+    fi
+    if [[ -e "$NGINX_PIN" ]] &&
+       ! grep -Fq 'Pin: origin nginx.org' "$NGINX_PIN"; then
+        fail "Refusing to overwrite an unrelated APT preference: $NGINX_PIN"
+    fi
+
+    install -d -m 0755 /usr/share/keyrings "$(dirname "$NGINX_SOURCE")" "$(dirname "$NGINX_PIN")"
+    key_tmp="$(mktemp)"
+    keyring_tmp="$(mktemp)"
+    source_tmp="$(mktemp "${NGINX_SOURCE}.XXXXXX")"
+    pin_tmp="$(mktemp "${NGINX_PIN}.XXXXXX")"
+    trap 'rm -f "$key_tmp" "$keyring_tmp" "$source_tmp" "$pin_tmp"' RETURN
+
+    curl --fail --silent --show-error --location "$NGINX_KEY_URL" -o "$key_tmp"
+    fingerprint="$(gpg --show-keys --with-colons "$key_tmp" |
+        awk -F: '$1 == "fpr" { print $10 }' |
+        grep -Fx '573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62' || true)"
+    [[ -n "$fingerprint" ]] ||
+        fail "Unexpected nginx.org signing key fingerprint."
+    gpg --dearmor --yes --output "$keyring_tmp" "$key_tmp"
+    install -m 0644 "$keyring_tmp" "$NGINX_KEYRING"
+
+    # The nginx.org package shares the Debian package name; keep the pin below
+    # 1000 so apt never downgrades a newer installed version.
+    printf 'deb [signed-by=%s] %s %s nginx\n' \
+        "$NGINX_KEYRING" "$channel_url" "$codename" > "$source_tmp"
+    printf 'Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n' \
+        > "$pin_tmp"
+    chmod 0644 "$source_tmp" "$pin_tmp"
+    mv "$source_tmp" "$NGINX_SOURCE"
+    mv "$pin_tmp" "$NGINX_PIN"
+
+    rm -f "$key_tmp" "$keyring_tmp" "$source_tmp" "$pin_tmp"
+    trap - RETURN
+    printf 'Nginx APT source configured: %s %s (%s channel)\n' \
+        "$channel_url" "$codename" "$NGINX_CHANNEL"
 }
 
 parse_arguments() {
@@ -241,27 +459,29 @@ prepare_package_sources() {
         install -m 0644 "$SCRIPT_DIR/lnmp-debian.conf" "$SYSTEM_CONFIG"
     fi
 
-    if [[ -f "$MYSQL_SOURCE" ]]; then
+    if [[ -f "$MYSQL_SOURCE" || -f "$NGINX_SOURCE" ]]; then
         command -v curl >/dev/null ||
-            fail "A stale MySQL APT source exists but curl is missing; install curl, then rerun this script."
+            fail "A stale MySQL or Nginx APT source exists but curl is missing; install curl, then rerun this script."
         command -v gpg >/dev/null ||
-            fail "A stale MySQL APT source exists but gpg is missing; install gnupg, then rerun this script."
+            fail "A stale MySQL or Nginx APT source exists but gpg is missing; install gnupg, then rerun this script."
         install_mysql_repository
+        install_nginx_repository
         apt-get update
     else
         apt-get update
         apt-get install -y ca-certificates curl gnupg
         install_mysql_repository
+        install_nginx_repository
         apt-get update
     fi
 }
 
 select_install_versions() {
     select_php_version
-    select_package_version "Nginx" nginx "$NGINX_VERSION"
+    select_package_version "Nginx" nginx "$NGINX_VERSION" 0 nginx.org
     NGINX_VERSION="$SELECTED_PACKAGE_VERSION"
-    select_package_version "MySQL 8+" mysql-server "$MYSQL_VERSION" 8
-    MYSQL_VERSION="$SELECTED_PACKAGE_VERSION"
+    select_mysql_version
+    finalize_mysql_repository
 }
 
 install_packages() {

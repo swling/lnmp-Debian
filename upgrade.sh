@@ -6,21 +6,31 @@ NGINX_KEY_URL=https://nginx.org/keys/nginx_signing.key
 NGINX_KEYRING=/usr/share/keyrings/nginx-archive-keyring.gpg
 NGINX_SOURCE=/etc/apt/sources.list.d/nginx.list
 NGINX_PIN=/etc/apt/preferences.d/99nginx
+PHP_REPO_URL=https://packages.sury.org/php
+PHP_SOURCE=/etc/apt/sources.list.d/php.list
+PHP_KEYRING=/usr/share/keyrings/debsuryorg-archive-keyring.gpg
+PHP_PIN=/etc/apt/preferences.d/99sury-php
+PHP_VERSION_STATE=/etc/lnmp-debian/php-version
+PHP_UPSTREAM_MARKER=/etc/lnmp-debian/php-upstream-service
+PHP_UPSTREAM_PREFIX_STATE=/etc/lnmp-debian/php-upstream-prefix
+USE_SOURCE=0
 AUTO_CONFIRM=0
 
 usage() {
     cat <<'EOF'
 Usage:
   upgrade.sh [--yes] [nginx [version] [stable|mainline]]
-  upgrade.sh [--yes] php [version]
+  upgrade.sh [--yes] php [--source] [version]
   upgrade.sh [--yes] mysql [version]
 
 With no component, an interactive menu is shown. Nginx/MySQL versions may be
-specified as upstream versions or full APT versions; PHP requires a full
-upstream patch version such as 8.4.17.
+specified as upstream versions or full APT versions. PHP accepts a major.minor
+branch (for example 8.5), a full patch version (8.5.13), or a full APT version.
+
 Nginx versions come from nginx.org; MySQL versions come from Oracle's APT
-repository configured by install.sh; PHP versions come from php.net source
-archives and must match the installed PHP major.minor branch.
+repository configured by install.sh. PHP upgrades use the sury APT repository
+and can cross major.minor branches. The legacy php.net source-build path is
+still available with --source but only upgrades within the installed branch.
 
 This script does not back up data or configuration; back up before upgrading.
 Interactive upgrades require typing "yes" to accept the risk.
@@ -234,7 +244,151 @@ install_php_management_updates() {
     install -m 0755 "${SCRIPT_DIR}/addons.sh" /usr/local/bin/addons.sh
 }
 
-upgrade_php() {
+configure_php_repository() {
+    local codename architecture key_tmp source_tmp pin_tmp fingerprint
+
+    codename="${VERSION_CODENAME:-}"
+    architecture="$(dpkg --print-architecture)"
+    [[ "$architecture" == amd64 || "$architecture" == arm64 || "$architecture" == armhf ]] ||
+        fail "The sury PHP repository does not support this architecture: $architecture"
+    [[ -n "$codename" ]] || fail "Could not determine Debian release codename."
+
+    if [[ -e "$PHP_SOURCE" ]] &&
+       ! grep -Fq 'packages.sury.org/php' "$PHP_SOURCE"; then
+        fail "Refusing to overwrite an unrelated APT source: $PHP_SOURCE"
+    fi
+    if [[ -e "$PHP_PIN" ]] &&
+       ! grep -Fq 'Pin: origin packages.sury.org' "$PHP_PIN"; then
+        fail "Refusing to overwrite an unrelated APT preference: $PHP_PIN"
+    fi
+
+    apt-get update
+    apt-get install -y curl gnupg ca-certificates
+    key_tmp="$(mktemp)"
+    source_tmp="$(mktemp "${PHP_SOURCE}.XXXXXX")"
+    pin_tmp="$(mktemp "${PHP_PIN}.XXXXXX")"
+    trap 'rm -f "$key_tmp" "$source_tmp" "$pin_tmp"' RETURN
+
+    curl --fail --silent --show-error --location \
+        "${PHP_REPO_URL}/apt.gpg" -o "$key_tmp"
+    fingerprint="$(gpg --show-keys --with-colons "$key_tmp" |
+        awk -F: '$1 == "fpr" { gsub(/ /, "", $10); print $10; exit }')"
+    [[ "$fingerprint" == 15058500A0235D97F5D10063B188E2B695BD4743 ]] ||
+        fail "Unexpected sury PHP repository signing key fingerprint: ${fingerprint:-unreadable}"
+    install -d -m 0755 /usr/share/keyrings "$(dirname "$PHP_SOURCE")" "$(dirname "$PHP_PIN")"
+    install -m 0644 "$key_tmp" "$PHP_KEYRING"
+
+    printf 'deb [signed-by=%s] %s/ %s main\n' \
+        "$PHP_KEYRING" "$PHP_REPO_URL" "$codename" > "$source_tmp"
+    # sury and Debian ship identically named php8.x-* packages. Pin sury above
+    # the Debian default but below 1000 so apt never downgrades.
+    printf 'Package: *\nPin: origin packages.sury.org\nPin-Priority: 900\n' > "$pin_tmp"
+    chmod 0644 "$source_tmp" "$pin_tmp"
+    install -m 0644 "$source_tmp" "$PHP_SOURCE"
+    install -m 0644 "$pin_tmp" "$PHP_PIN"
+    rm -f "$key_tmp" "$source_tmp" "$pin_tmp"
+    trap - RETURN
+    apt-get update
+    printf 'sury PHP APT repository configured.\n'
+}
+
+resolve_php_upgrade_version() {
+    local requested=$1 choice branch candidate normalized index existing marker
+    local -a branches versions matches
+
+    mapfile -t branches < <(
+        apt-cache pkgnames |
+            grep -E '^php[0-9]+\.[0-9]+-fpm$' |
+            sed -E 's/^php([0-9]+\.[0-9]+)-fpm$/\1/' |
+            sort -Vu
+    )
+    ((${#branches[@]} > 0)) || fail "No PHP FPM packages are available from sury."
+
+    if [[ -z "$requested" ]]; then
+        printf '\nAvailable PHP branches from sury:\n' >&2
+        for index in "${!branches[@]}"; do
+            marker=
+            [[ "$index" -eq $((${#branches[@]} - 1)) ]] && marker=' [default]'
+            printf '  %d) %s%s\n' "$((index + 1))" "${branches[index]}" "$marker" >&2
+        done
+        read -r -p "Select branch [${branches[${#branches[@]} - 1]}]: " choice
+        if [[ -z "$choice" ]]; then
+            branch="${branches[${#branches[@]} - 1]}"
+        elif [[ "$choice" =~ ^[0-9]+$ ]] &&
+             (( choice >= 1 && choice <= ${#branches[@]} )); then
+            branch="${branches[choice - 1]}"
+        elif [[ " ${branches[*]} " == *" ${choice} "* ]]; then
+            branch=$choice
+        else
+            fail "Invalid PHP branch selection: $choice"
+        fi
+    else
+        [[ "$requested" =~ ^([0-9]+\.[0-9]+)(\.[0-9]+)?([-+~].*)?$ ]] ||
+            fail "Invalid PHP version: ${requested}. Use a branch (8.5), a patch version (8.5.13), or a full APT version."
+        branch="${BASH_REMATCH[1]}"
+    fi
+
+    local found=0
+    for existing in "${branches[@]}"; do
+        [[ "$existing" == "$branch" ]] && { found=1; break; }
+    done
+    (( found )) ||
+        fail "PHP ${branch} is not available from sury. Available branches: ${branches[*]}"
+    PHP_UPGRADE_BRANCH="$branch"
+
+    mapfile -t versions < <(list_package_versions "php${branch}-fpm" packages.sury.org)
+    ((${#versions[@]} > 0)) || fail "No sury APT versions for php${branch}-fpm."
+    if [[ -z "$requested" || "$requested" == "$branch" ]]; then
+        SELECTED_PHP_VERSION="${versions[${#versions[@]} - 1]}"
+    else
+        matches=()
+        for candidate in "${versions[@]}"; do
+            version_matches "$candidate" "$requested" && matches+=("$candidate")
+        done
+        ((${#matches[@]} > 0)) ||
+            fail "No sury version matches ${requested}. Available: ${versions[*]}"
+        ((${#matches[@]} == 1)) ||
+            fail "Version ${requested} is ambiguous for php${branch}-fpm; use one of: ${matches[*]}"
+        SELECTED_PHP_VERSION="${matches[0]}"
+    fi
+}
+
+apply_php_fpm_pool_config() {
+    local branch=$1 pool_conf fpm_conf
+    pool_conf="/etc/php/${branch}/fpm/pool.d/www.conf"
+    [[ -s "$pool_conf" ]] || fail "PHP-FPM pool configuration not found: $pool_conf"
+    sed -i -E \
+        -e 's/^[;[:space:]]*user[[:space:]]*=.*/user = www/' \
+        -e 's/^[;[:space:]]*group[[:space:]]*=.*/group = www/' \
+        -e "s#^[;[:space:]]*listen[[:space:]]*=.*#listen = /run/php/php${branch}-fpm.sock#" \
+        -e 's/^[;[:space:]]*listen.owner[[:space:]]*=.*/listen.owner = www/' \
+        -e 's/^[;[:space:]]*listen.group[[:space:]]*=.*/listen.group = www/' \
+        -e 's/^[;[:space:]]*listen.mode[[:space:]]*=.*/listen.mode = 0660/' \
+        -e 's/^[[:space:]]*listen\.acl_(users|groups)[[:space:]]*=.*/; &/' \
+        "$pool_conf"
+    grep -qE '^[[:space:]]*user[[:space:]]*=' "$pool_conf" ||
+        printf '\nuser = www\n' >> "$pool_conf"
+    grep -qE '^[[:space:]]*group[[:space:]]*=' "$pool_conf" ||
+        printf 'group = www\n' >> "$pool_conf"
+    grep -qE '^[[:space:]]*listen[[:space:]]*=' "$pool_conf" ||
+        printf 'listen = /run/php/php%s-fpm.sock\n' "$branch" >> "$pool_conf"
+    grep -qE '^[[:space:]]*listen\.owner[[:space:]]*=' "$pool_conf" ||
+        printf 'listen.owner = www\n' >> "$pool_conf"
+    grep -qE '^[[:space:]]*listen\.group[[:space:]]*=' "$pool_conf" ||
+        printf 'listen.group = www\n' >> "$pool_conf"
+    grep -qE '^[[:space:]]*listen\.mode[[:space:]]*=' "$pool_conf" ||
+        printf 'listen.mode = 0660\n' >> "$pool_conf"
+    grep -qE '^[[:space:]]*listen\.acl_(users|groups)[[:space:]]*=' "$pool_conf" &&
+        fail "Could not disable PHP-FPM socket ACL settings in ${pool_conf}."
+    fpm_conf="/etc/php/${branch}/fpm/php-fpm.conf"
+    if grep -qE '^[;[:space:]]*pid[[:space:]]*=' "$fpm_conf"; then
+        sed -i -E 's#^[;[:space:]]*pid[[:space:]]*=.*#pid = /run/php/php-fpm.pid#' "$fpm_conf"
+    else
+        printf '\npid = /run/php/php-fpm.pid\n' >> "$fpm_conf"
+    fi
+}
+
+upgrade_php_source() {
     local requested=$1 php_version php_branch current_version prefix build_root archive
     local extension_dir php_api php_ini marker_file service_file service_tmp socket socket_owner
     local old_service_tmp previous_prefix previous_service
@@ -462,6 +616,156 @@ EOF
     printf 'PHP-FPM upgraded from php.net to %s at %s.\n' "$requested" "$prefix"
 }
 
+upgrade_php_sury() {
+    local requested=$1 branch version target_full current_version current_full
+    local old_service= old_prefix= service_backup=
+    local old_service_active=0 old_service_enabled=0
+    local nginx_snippet socket socket_owner
+
+    confirm_risk "PHP (sury APT)"
+
+    if [[ -r "$PHP_VERSION_STATE" ]]; then
+        IFS= read -r current_version < "$PHP_VERSION_STATE" || true
+    else
+        current_version="$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;' 2>/dev/null || true)"
+    fi
+    [[ "$current_version" =~ ^[0-9]+\.[0-9]+$ ]] ||
+        fail "Could not determine the installed PHP branch."
+    [[ -d "/etc/php/${current_version}/fpm" ]] ||
+        fail "PHP-FPM ${current_version} is not installed."
+
+    configure_php_repository
+    resolve_php_upgrade_version "$requested"
+    branch="$PHP_UPGRADE_BRANCH"
+    version="$SELECTED_PHP_VERSION"
+    target_full="${version#*:}"
+    target_full="${target_full%%[-+~]*}"
+
+    old_service="php${current_version}-fpm"
+    if [[ -r "$PHP_UPSTREAM_MARKER" ]]; then
+        IFS= read -r old_service < "$PHP_UPSTREAM_MARKER" || true
+        [[ "$old_service" == lnmp-php-upstream ]] ||
+            fail "Unknown PHP upstream service marker: $old_service"
+        if [[ -r "$PHP_UPSTREAM_PREFIX_STATE" ]]; then
+            IFS= read -r old_prefix < "$PHP_UPSTREAM_PREFIX_STATE" || true
+        fi
+    fi
+    systemctl is-active --quiet "$old_service" && old_service_active=1
+    systemctl is-enabled --quiet "$old_service" && old_service_enabled=1
+
+    current_full="$(dpkg-query -W -f='${Version}' "php${current_version}-fpm" 2>/dev/null || true)"
+    current_full="${current_full#*:}"
+    current_full="${current_full%%[-+~]*}"
+    if [[ -z "$current_full" && -n "$old_prefix" && -x "${old_prefix}/bin/php" ]]; then
+        current_full="$("${old_prefix}/bin/php" -r 'echo PHP_VERSION;' 2>/dev/null || true)"
+    fi
+    [[ "$current_full" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        fail "Could not determine the current PHP version."
+    dpkg --compare-versions "$target_full" gt "$current_full" ||
+        fail "Requested PHP ${target_full} is not newer than the installed ${current_full}."
+
+    local -a php_packages=(
+        "php${branch}-cli"
+        "php${branch}-mysql"
+        "php${branch}-curl"
+        "php${branch}-gd"
+        "php${branch}-mbstring"
+        "php${branch}-xml"
+        "php${branch}-zip"
+        "php${branch}-bcmath"
+        "php${branch}-intl"
+    )
+    # OPcache is part of the PHP core from 8.5 onward; sury has no separate package.
+    if ! dpkg --compare-versions "$branch" ge 8.5; then
+        php_packages+=("php${branch}-opcache")
+    fi
+
+    printf '\nPHP upgrade plan:\n  From: PHP %s (%s)\n  To:   PHP %s (php%s-fpm=%s)\n' \
+        "$current_full" "$old_service" "$target_full" "$branch" "$version"
+    printf '  Packages: %s\n' "${php_packages[*]}"
+    print_apt_plan "PHP ${branch}" "php${branch}-fpm=${version}" "${php_packages[@]}"
+
+    if [[ "$old_service" == lnmp-php-upstream ]]; then
+        service_backup="$(mktemp)"
+        cp -p /etc/systemd/system/lnmp-php-upstream.service "$service_backup"
+    fi
+
+    run_apt_install "php${branch}-fpm=${version}" "${php_packages[@]}"
+    apply_php_fpm_pool_config "$branch"
+
+    if (( old_service_active )); then
+        systemctl stop "$old_service" ||
+            fail "Could not stop the previous PHP-FPM service; no runtime switch was made."
+    fi
+    systemctl disable "$old_service" || true
+
+    printf '%s\n' "$branch" > "$PHP_VERSION_STATE"
+    for nginx_snippet in /etc/nginx/snippets/enable-php.conf \
+                         /etc/nginx/snippets/enable-php-pathinfo.conf; do
+        [[ -f "$nginx_snippet" ]] || continue
+        sed -i -E "s#/run/php/php[0-9]+\.[0-9]+-fpm\.sock#/run/php/php${branch}-fpm.sock#g" \
+            "$nginx_snippet"
+    done
+
+    systemctl daemon-reload
+    if ! systemctl enable --now "php${branch}-fpm"; then
+        printf '%s\n' "$current_version" > "$PHP_VERSION_STATE"
+        for nginx_snippet in /etc/nginx/snippets/enable-php.conf \
+                             /etc/nginx/snippets/enable-php-pathinfo.conf; do
+            [[ -f "$nginx_snippet" ]] || continue
+            sed -i -E "s#/run/php/php${branch}-fpm\.sock#/run/php/php${current_version}-fpm.sock#g" \
+                "$nginx_snippet"
+        done
+        if [[ "$old_service" == lnmp-php-upstream ]]; then
+            install -m 0644 "$service_backup" /etc/systemd/system/lnmp-php-upstream.service
+            printf '%s\n' lnmp-php-upstream > "$PHP_UPSTREAM_MARKER"
+            [[ -z "$old_prefix" ]] ||
+                printf '%s\n' "$old_prefix" > "$PHP_UPSTREAM_PREFIX_STATE"
+        fi
+        systemctl daemon-reload
+        if (( old_service_enabled )); then
+            systemctl enable "$old_service" || true
+        else
+            systemctl disable "$old_service" || true
+        fi
+        if (( old_service_active )); then
+            systemctl start "$old_service" || true
+        fi
+        rm -f "$service_backup"
+        fail "PHP-FPM ${branch} failed to start; the previous PHP runtime was restored."
+    fi
+
+    if [[ "$old_service" == lnmp-php-upstream ]]; then
+        rm -f /etc/systemd/system/lnmp-php-upstream.service \
+              "$PHP_UPSTREAM_MARKER" "$PHP_UPSTREAM_PREFIX_STATE"
+        rm -f "$service_backup"
+    fi
+    install_php_management_updates
+
+    systemctl is-active --quiet "php${branch}-fpm" ||
+        fail "PHP-FPM ${branch} is not active after the upgrade."
+    socket="/run/php/php${branch}-fpm.sock"
+    [[ -S "$socket" ]] ||
+        fail "PHP-FPM ${branch} is active but did not create ${socket}."
+    socket_owner="$(stat -c '%U:%G' "$socket")"
+    [[ "$socket_owner" == www:www ]] ||
+        fail "PHP-FPM socket is owned by ${socket_owner}; expected www:www so Nginx can connect."
+    /usr/bin/php"${branch}" -v
+    /usr/sbin/nginx -t
+    systemctl reload nginx ||
+        fail "Nginx could not be reloaded after the PHP upgrade."
+    printf 'PHP upgraded to %s via sury (service php%s-fpm).\n' "$target_full" "$branch"
+    printf 'Note: third-party extensions installed via addons.sh need to be reinstalled for PHP %s.\n' "$branch"
+}
+
+upgrade_php() {
+    if (( USE_SOURCE )); then
+        upgrade_php_source "$1"
+    else
+        upgrade_php_sury "$1"
+    fi
+}
+
 upgrade_mysql() {
     local requested=$1 version current_version target_release
     [[ -x /usr/bin/mysql ]] || fail "MySQL client not found at /usr/bin/mysql."
@@ -491,7 +795,7 @@ show_menu() {
     cat <<'EOF'
 Select a component to upgrade:
   1: Nginx (official nginx.org APT repository)
-  2: PHP (php.net source; installed major.minor branch only)
+  2: PHP (sury APT repository; use --source for php.net source build)
   3: MySQL (configured Oracle APT repository)
   4: Exit
 EOF
@@ -535,7 +839,19 @@ else
             fi
             (($# == 0)) || { usage >&2; exit 2; }
             ;;
-        php|mysql)
+        php)
+            if [[ "${1:-}" == --source ]]; then
+                USE_SOURCE=1
+                shift
+            fi
+            requested="${1:-}"
+            if (($# > 0)); then
+                shift
+            fi
+            (($# == 0)) || { usage >&2; exit 2; }
+            channel=stable
+            ;;
+        mysql)
             requested="${1:-}"
             if (($# > 0)); then
                 shift
