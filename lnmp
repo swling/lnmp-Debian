@@ -173,14 +173,7 @@ server
 
     include rewrite/${rewrite}.conf;
     include snippets/${php_config};
-
-    location ~* \.(gif|jpe?g|png|bmp|swf|ico|webp)$ {
-        expires 30d;
-    }
-
-    location ~* \.(js|css)$ {
-        expires 12h;
-    }
+    include conf/cache-static.conf;
 
     location ~ /.well-known {
         allow all;

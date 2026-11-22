@@ -350,7 +350,8 @@ ensure_web_user() {
 
 prepare_debian_layout() {
     mkdir -p "$NGINX_SNIPPET_DIR" "$REWRITE_DIR" \
-        "${NGINX_CONFIG_DIR}/ssl" "${NGINX_CONFIG_DIR}/sites-available" \
+        "${NGINX_CONFIG_DIR}/conf" "${NGINX_CONFIG_DIR}/ssl" \
+        "${NGINX_CONFIG_DIR}/sites-available" \
         "${NGINX_CONFIG_DIR}/sites-enabled" /run/php
     if [[ ! -d "$WEB_ROOT" ]]; then
         mkdir -p "$WEB_ROOT"
@@ -366,6 +367,57 @@ prepare_debian_layout() {
         mkdir -p "$NGINX_LOG_DIR"
         chown www:www "$NGINX_LOG_DIR"
     fi
+}
+
+disable_nginx_access_log() {
+    local conf=$1 tmp http_line
+    tmp="$(mktemp "${conf}.XXXXXX")"
+    http_line="$(awk '/^[[:space:]]*http[[:space:]]*\{/ { print NR; exit }' "$conf")"
+    [[ -n "$http_line" ]] || fail "Cannot find the http block in ${conf}; refusing to modify access_log."
+    awk -v http_line="$http_line" '
+        {
+            in_http_line[NR] = in_http
+            if ($0 ~ /^[[:space:]]*http[[:space:]]*\{/) {
+                in_http = 1
+                in_http_line[NR] = 1
+            }
+            if (in_http_line[NR] && $0 ~ /(#[[:space:]]*)?access_log[[:space:]]+[^;]+;/) found = 1
+            lines[NR] = $0
+            if ($0 ~ /^}/) in_http = 0
+        }
+        END {
+            inserted = 0
+            for (i = 1; i <= NR; i++) {
+                line = lines[i]
+                if (in_http_line[i]) {
+                    sub(/(#[[:space:]]*)?access_log[[:space:]]+[^;]+;/, "access_log off;", line)
+                }
+                print line
+                if (i == http_line && !found && !inserted) {
+                    print "    access_log off;"
+                    inserted = 1
+                }
+            }
+        }
+    ' "$conf" > "$tmp"
+    chmod --reference="$conf" "$tmp"
+    mv "$tmp" "$conf"
+}
+
+install_shared_nginx_conf() {
+    local source_dir=$1 target_dir=$2 source target name
+    [[ -d "$source_dir" ]] || fail "Bundled Nginx config directory is missing: ${source_dir}"
+    mkdir -p "$target_dir"
+    for source in "$source_dir"/*.conf; do
+        [[ -f "$source" ]] || continue
+        name="${source##*/}"
+        # default-site.conf is a site template, not a reusable snippet.
+        [[ "$name" == default-site.conf ]] && continue
+        target="${target_dir}/${name}"
+        if [[ ! -e "$target" && ! -L "$target" ]]; then
+            install -m 0644 "$source" "$target"
+        fi
+    done
 }
 
 configure_nginx() {
@@ -414,11 +466,17 @@ EOF
             : > "${REWRITE_DIR}/${rewrite_file}.conf"
         fi
     done
+    # Deploy reusable snippets (e.g. cache-static.conf) so vhosts can include
+    # them from a server block with: include conf/cache-static.conf;
+    install_shared_nginx_conf "$SCRIPT_DIR/conf" "${NGINX_CONFIG_DIR}/conf"
     local nginx_conf nginx_default_available nginx_default_enabled nginx_default_template nginx_default_temp
     nginx_conf="${NGINX_CONFIG_DIR}/nginx.conf"
     if [[ -f "$nginx_conf" ]]; then
         cp -n "$nginx_conf" "${nginx_conf}.lnmp-debian.orig"
         sed -i -E 's/^[[:space:]]*user[[:space:]]+www-data;/user www;/' "$nginx_conf"
+        # Disable the http-level access log by default. Virtual hosts with an
+        # explicit access_log directive can still opt in to logging.
+        disable_nginx_access_log "$nginx_conf"
     fi
 
     nginx_default_available="${NGINX_CONFIG_DIR}/sites-available/default"

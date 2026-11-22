@@ -16,7 +16,7 @@ MYSQL_VERSION=""
 
 ## Debian 配置路径
 
-安装器使用 Debian 软件包的原生配置和程序路径，不创建旧版 `/usr/local` 配置路径的兼容链接。Nginx 主配置位于 `/etc/nginx/nginx.conf`，虚拟主机使用 Debian 的 `sites-available` / `sites-enabled` 布局，PHP 和 rewrite 片段位于 `/etc/nginx/snippets` 与 `/etc/nginx/rewrite`，证书位于 `/etc/nginx/ssl`。PHP-FPM 配置位于 `/etc/php/<版本>/fpm`，MySQL 沿用 Debian 默认的 `/etc/mysql` 配置目录（仅当 `MYSQL_DATA_DIR` 设为非默认值时，安装器会写入 `/etc/mysql/mysql.conf.d/zz-lnmp-debian.cnf` 指定数据目录），默认数据目录为 `/var/lib/mysql`，Nginx 日志默认位于 `/var/log/nginx`。
+安装器使用 Debian 软件包的原生配置和程序路径，不创建旧版 `/usr/local` 配置路径的兼容链接。Nginx 主配置位于 `/etc/nginx/nginx.conf`，虚拟主机使用 Debian 的 `sites-available` / `sites-enabled` 布局，PHP 和 rewrite 片段位于 `/etc/nginx/snippets` 与 `/etc/nginx/rewrite`，证书位于 `/etc/nginx/ssl`。PHP-FPM 配置位于 `/etc/php/<版本>/fpm`，MySQL 沿用 Debian 默认的 `/etc/mysql` 配置目录（仅当 `MYSQL_DATA_DIR` 设为非默认值时，安装器会写入 `/etc/mysql/mysql.conf.d/zz-lnmp-debian.cnf` 指定数据目录），默认数据目录为 `/var/lib/mysql`，Nginx 日志默认位于 `/var/log/nginx`。安装器会在 `/etc/nginx/nginx.conf` 的 `http` 块中设置 `access_log off;`，因此默认站点及未显式配置访问日志的虚拟主机不会写访问日志；在 `lnmp vhost add` 中启用访问日志的站点仍会在自己的 server 块里写入独立的 `access_log` 指令并覆盖该默认值。安装器还会把项目 `conf/` 目录中的通用配置片段（目前为 `cache-static.conf`）复制到 `/etc/nginx/conf/`；该目录不会被 `nginx.conf` 自动加载，需要在 server 块里自行 `include conf/cache-static.conf;` 才会生效。已存在的同名片段不会被覆盖，方便保留自定义修改。新建虚拟主机会在 server 块中自动 `include conf/cache-static.conf;`，不再生成重复的静态文件 location 块；已有主机如需使用需自行添加该 include 并移除重叠的静态 location。
 
 默认网站目录为 `/home/wwwroot/default`。安装器直接从 [conf/default-site.conf](../conf/default-site.conf) 部署默认站点配置，并按 `DEFAULT_WEB_ROOT` 设置根目录、`index.php` 和 PHP-FPM 处理。Debian 原始默认配置会在旁边保留 `.lnmp-debian.orig` 备份；如果检测到自定义默认站点，安装器会停止并说明原因，不会覆盖。
 

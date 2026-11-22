@@ -147,7 +147,7 @@ LNMP Debian 卸载计划
   - systemd 单元: lnmp-acme-renew.timer / .service, lnmp-php-upstream.service
   - 管理命令: /usr/local/bin/lnmp, /usr/local/bin/addons.sh, /usr/bin/lnmp
   - 配置片段与状态: /etc/nginx/snippets, /etc/nginx/rewrite（仅内置模板）,
-    /etc/lnmp-debian.conf, /etc/lnmp-debian/
+    /etc/nginx/conf（仅内置片段）, /etc/lnmp-debian.conf, /etc/lnmp-debian/
   - APT 仓库与密钥: MySQL / nginx.org
   - 还原 .lnmp-debian.orig 备份后删除备份文件
 
@@ -239,6 +239,13 @@ if [[ -d "${NGINX_DIR}/rewrite" ]]; then
     if [[ -n "$leftover" ]]; then
         warn "${NGINX_DIR}/rewrite 中仍有自定义规则，已保留整个目录。"
     fi
+fi
+if [[ -e "${NGINX_DIR}/conf/cache-static.conf" || -L "${NGINX_DIR}/conf/cache-static.conf" ]]; then
+    rm -f -- "${NGINX_DIR}/conf/cache-static.conf"
+    info "已删除: ${NGINX_DIR}/conf/cache-static.conf"
+fi
+if [[ -d "${NGINX_DIR}/conf" ]] && [[ -z "$(find "${NGINX_DIR}/conf" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    rmdir -- "${NGINX_DIR}/conf" 2>/dev/null || true
 fi
 [[ -e "$SYSTEM_CONFIG" ]] && { rm -f -- "$SYSTEM_CONFIG"; info "已删除: $SYSTEM_CONFIG"; }
 if [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
