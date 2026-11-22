@@ -34,9 +34,7 @@
 │   │   │   ├── other.conf                # 空规则（自定义占位，预置）
 │   │   │   └── <name>.conf               # 内置模板或自定义规则
 │   │   │
-│   │   ├── ssl/                          # [ACME] 同时作为 acme.sh 数据目录（--config-home）
-│   │   │   ├── account.conf              # acme.sh 账户配置（签发时生成）
-│   │   │   ├── ca/                       # acme.sh 的 CA/账户密钥（签发时生成）
+│   │   ├── ssl/                          # [LNMP] SSL 证书目录，兼作 acme.sh 证书目录（--certhome）
 │   │   │   └── <domain>/                 # 证书按域名在此原位生成，无需复制
 │   │   │       ├── fullchain.cer         # 证书链
 │   │   │       └── <domain>.key          # 私钥

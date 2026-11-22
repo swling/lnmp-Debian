@@ -9,9 +9,10 @@ SYSTEM_CONFIG=/etc/lnmp-debian.conf
 STATE_DIR=/etc/lnmp-debian
 NGINX_DIR=/etc/nginx
 ACME_HOME=/usr/local/acme.sh
-# acme.sh 数据目录（--config-home）与 SSL 证书共用 /etc/nginx/ssl；
-# ACME_HOME 仍是程序目录（--home），卸载时不处理这两处。
-ACME_CONFIG_HOME="${NGINX_DIR}/ssl"
+# 证书目录（--certhome）与 SSL 证书共用 /etc/nginx/ssl；
+# ACME_HOME 仍是程序目录（--home），配置/账户密钥在 acme.sh 默认配置目录。
+# 卸载时不处理这些 ACME 数据。
+ACME_CERT_HOME="${NGINX_DIR}/ssl"
 MYSQL_KEYRING=/usr/share/keyrings/mysql-apt.gpg
 MYSQL_SOURCE=/etc/apt/sources.list.d/mysql.list
 NGINX_KEYRING=/usr/share/keyrings/nginx-archive-keyring.gpg
@@ -159,7 +160,7 @@ LNMP Debian 卸载计划
   - 虚拟主机配置: ${NGINX_DIR}/sites-available/ / sites-enabled/
   - 日志: ${NGINX_LOG_DIR}
   - ACME 程序目录: ${ACME_HOME}
-  - ACME 数据（账户密钥/配置）: ${ACME_CONFIG_HOME}（与上面的 SSL 证书同目录）
+  - ACME 证书目录（--certhome）: ${ACME_CERT_HOME}（与上面的 SSL 证书同目录）
 ================================================================
 EOF
 warn "不会备份数据库，也不会删除任何数据库文件/目录。"
@@ -316,7 +317,7 @@ cat <<EOF
   虚拟主机配置:   ${NGINX_DIR}/sites-available/ / sites-enabled/
   日志:           ${NGINX_LOG_DIR}
   ACME 程序目录:  ${ACME_HOME}
-  ACME 数据:      ${ACME_CONFIG_HOME}（与 SSL 证书同目录）
+  ACME 证书目录:  ${ACME_CERT_HOME}（与 SSL 证书同目录）
   残留备份:       *.lnmp-debian.orig（如 /var/lib/mysql.lnmp-debian.orig）
 ================================================================
 EOF

@@ -6,7 +6,7 @@ sudo install -d -m 700 /home/bf
 sudo tar -czpf /home/bf/nginx-conf.tar.gz -C /etc/nginx
 sudo tar -czpf /home/bf/php-conf.tar.gz -C /etc/php/8.4
 sudo tar -czpf /home/bf/mysql-conf.tar.gz -C /etc/mysql
-sudo tar -czpf /home/bf/mysql-conf.tar.gz -C /etc/mysql
+sudo tar -czpf /home/bf/acme.sh-backup.tar.gz -C /usr/local acme.sh
 ```
 
 恢复前先备份目标服务器当前配置，再从备份中**按需覆盖**，不要先删除配置目录：

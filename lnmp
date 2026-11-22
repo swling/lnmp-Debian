@@ -19,6 +19,10 @@ WEB_ROOT="${WEB_ROOT:-/home/wwwroot}"
 DEFAULT_WEB_ROOT="${DEFAULT_WEB_ROOT:-${WEB_ROOT}/default}"
 NGINX_LOG_DIR="${NGINX_LOG_DIR:-/var/log/nginx}"
 ACME_HOME=/usr/local/acme.sh
+# 证书目录（--certhome / --cert-home）指向 Nginx SSL 目录：证书由 acme.sh
+# 直接写到 <cert-home>/<域名>/，即历史路径 /etc/nginx/ssl/<域名>/，无需再复制。
+# 配置与账户密钥仍留在 acme.sh 默认配置目录；ACME_HOME 是程序目录（--home）。
+ACME_CERT_HOME="${SSL_DIR}"
 ACME_BIN="$(command -v acme.sh || true)"
 is_supported_php_version() {
     local major
@@ -370,7 +374,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=${ACME_BIN} --cron --home ${ACME_HOME}
+ExecStart=${ACME_BIN} --cron --home ${ACME_HOME} --certhome ${ACME_CERT_HOME}
 EOF
     cat > "$timer_file" <<'EOF'
 [Unit]
@@ -396,7 +400,7 @@ issue_certificate() {
     [[ -n "$ACME_BIN" ]] || fail "acme.sh is missing; install the Debian package with apt."
     [[ -n "${CERT_EMAIL:-}" ]] || collect_email
     ensure_acme_renewal_timer
-    mkdir -p "$ACME_HOME" "$SSL_DIR"
+    mkdir -p "$ACME_HOME" "$ACME_CERT_HOME"
     domain_args=(-d "$CERT_DOMAIN")
     read -r -a additional_names <<< "$CERT_MORE"
     for name in "${additional_names[@]}"; do
@@ -409,8 +413,9 @@ issue_certificate() {
         webroot="${webroot:-${WEB_ROOT}/${CERT_DOMAIN}}"
         [[ -d "$webroot" ]] || fail "Web root does not exist: $webroot"
         "$ACME_BIN" --home "$ACME_HOME" --register-account -m "$CERT_EMAIL" --server "$ca"
-        "$ACME_BIN" --home "$ACME_HOME" --issue --server "$ca" \
-            "${domain_args[@]}" --webroot "$webroot" --keylength 2048
+        "$ACME_BIN" --home "$ACME_HOME" --certhome "$ACME_CERT_HOME" --issue --server "$ca" \
+            "${domain_args[@]}" --webroot "$webroot" --keylength 2048 \
+            --renew-hook "systemctl reload nginx"
     else
         if [[ -n "$provider" ]]; then
             dns_plugin="dns_${provider}"
@@ -418,18 +423,18 @@ issue_certificate() {
             fail "DNS provider is required for DNS validation."
         fi
         "$ACME_BIN" --home "$ACME_HOME" --register-account -m "$CERT_EMAIL" --server "$ca"
-        "$ACME_BIN" --home "$ACME_HOME" --issue --server "$ca" \
-            "${domain_args[@]}" --dns "$dns_plugin" --keylength 2048
+        "$ACME_BIN" --home "$ACME_HOME" --certhome "$ACME_CERT_HOME" --issue --server "$ca" \
+            "${domain_args[@]}" --dns "$dns_plugin" --keylength 2048 \
+            --renew-hook "systemctl reload nginx"
     fi
 
-    cert_dir="${SSL_DIR}/${CERT_DOMAIN}"
+    # 证书由 acme.sh 直接写入 <cert-home>/<域名>/，即历史路径 /etc/nginx/ssl/<域名>/，
+    # 无需 --install-cert 复制；续签后的 reload 由签发时的 --renew-hook 负责。
+    cert_dir="${ACME_CERT_HOME}/${CERT_DOMAIN}"
     cert="${cert_dir}/fullchain.cer"
     key="${cert_dir}/${CERT_DOMAIN}.key"
-    mkdir -p "$cert_dir"
-    "$ACME_BIN" --home "$ACME_HOME" --install-cert -d "$CERT_DOMAIN" \
-        --key-file "$key" --fullchain-file "$cert" \
-        --reloadcmd "systemctl reload nginx"
     [[ -s "$cert" && -s "$key" ]] || fail "ACME client did not install the certificate files."
+    systemctl reload nginx
     if [[ "$challenge" == webroot ]]; then
         append_ssl_config "$CERT_DOMAIN" "$CERT_NAMES" "$cert" "$key"
     fi
