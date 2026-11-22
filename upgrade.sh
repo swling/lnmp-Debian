@@ -22,7 +22,12 @@ Nginx versions come from nginx.org; MySQL versions come from Oracle's APT
 repository configured by install.sh; PHP versions come from php.net source
 archives and must match the installed PHP major.minor branch.
 
---yes skips the final confirmation. A version must be explicitly supplied.
+This script does not back up data or configuration; back up before upgrading.
+Interactive upgrades require typing "yes" to accept the risk.
+
+--yes skips that confirmation. An explicit version is required with
+--yes or when there is no interactive terminal. Non-interactive upgrades
+therefore require both an explicit version and --yes.
 EOF
 }
 
@@ -93,8 +98,8 @@ resolve_package_version() {
     if [[ -z "$requested" ]]; then
         selected="${matches[${#matches[@]}-1]}"
         if [[ -t 0 ]]; then
-            printf 'Available versions for %s:\n' "$package"
-            printf '  %s\n' "${matches[@]}"
+            printf 'Available versions for %s:\n' "$package" >&2
+            printf '  %s\n' "${matches[@]}" >&2
             read -r -p "Version to install [${selected}]: " requested
             if [[ -n "$requested" ]]; then
                 resolve_package_version "$package" "$requested" "$minimum_major" "$origin"
@@ -110,63 +115,47 @@ resolve_package_version() {
     printf '%s' "${matches[0]}"
 }
 
-confirm_plan() {
-    local component=$1
-    shift
-    printf '\nAPT plan for %s:\n' "$component"
-    apt-get -s install "$@"
+confirm_risk() {
+    local component=$1 answer
     if ((AUTO_CONFIRM)); then
         return
     fi
     [[ -t 0 ]] || fail "Refusing to upgrade without an interactive confirmation (or pass --yes)."
-    read -r -p "Proceed with this upgrade? [y/N]: " answer
-    [[ "$answer" =~ ^[Yy]$ ]] || fail "Upgrade cancelled."
+    printf '\n================================================================\n' >&2
+    printf 'WARNING: %s upgrade will modify this system.\n' "$component" >&2
+    printf 'This script does NOT create backups. Back up your data and\n' >&2
+    printf 'configuration yourself before proceeding.\n' >&2
+    printf '\nTo accept the risk, type exactly:\n' >&2
+    printf '\n            >>>  yes  <<<\n\n' >&2
+    printf '================================================================\n' >&2
+    read -r -p "Type yes to continue (anything else cancels): " answer
+    [[ "$answer" == yes ]] || fail "Upgrade cancelled."
 }
 
-confirm_source_upgrade() {
+print_apt_plan() {
+    local component=$1
+    shift
+    printf '\nAPT plan for %s:\n' "$component"
+    apt-get -s install "$@"
+}
+
+print_source_plan() {
     local component=$1 version=$2 prefix=$3
     printf '\nUpstream source upgrade plan:\n  Component: %s\n  Version: %s\n  Prefix: %s\n' \
         "$component" "$version" "$prefix"
-    if ((AUTO_CONFIRM)); then
-        return
-    fi
-    [[ -t 0 ]] || fail "Refusing to build upstream source without confirmation (or pass --yes)."
-    read -r -p "Build and switch to this upstream version? [y/N]: " answer
-    [[ "$answer" =~ ^[Yy]$ ]] || fail "Upgrade cancelled."
 }
 
-run_confirmed_install() {
+run_apt_install() {
     DEBIAN_FRONTEND=readline apt-get install -y \
         -o Dpkg::Options::=--force-confold "$@"
 }
 
-backup_home() {
-    local home=
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        home="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
-    fi
-    printf '%s' "${home:-${HOME:-/root}}"
-}
-
-backup_nginx_config() {
-    local backup_home_path backup
-    [[ -d /etc/nginx ]] || fail "Nginx configuration directory not found: /etc/nginx"
-    backup_home_path="$(backup_home)"
-    [[ -d "$backup_home_path" ]] || fail "Backup home directory not found: $backup_home_path"
-    backup="${backup_home_path}/nginx-backup-$(date +%F-%H%M%S).tar.gz"
-    tar -czf "$backup" -C / etc/nginx
-    chmod 0600 "$backup"
-    if [[ -n "${SUDO_USER:-}" ]]; then
-        chown "$SUDO_USER" "$backup"
-    fi
-    printf 'Nginx config backup: %s\n' "$backup"
-}
-
 configure_nginx_repository() {
-    local channel=$1 codename key_tmp keyring_tmp source_tmp pin_tmp fingerprint
+    local channel=$1 codename key_tmp keyring_tmp source_tmp pin_tmp fingerprint channel_url
     codename="${VERSION_CODENAME:-}"
     case "$channel" in
-        stable|mainline) ;;
+        stable) channel_url=https://nginx.org/packages/debian ;;
+        mainline) channel_url=https://nginx.org/packages/mainline/debian ;;
         *) fail "Nginx channel must be stable or mainline." ;;
     esac
     if [[ -e "$NGINX_SOURCE" ]] &&
@@ -194,8 +183,8 @@ configure_nginx_repository() {
     gpg --dearmor --yes --output "$keyring_tmp" "$key_tmp"
     install -m 0644 "$keyring_tmp" "$NGINX_KEYRING"
 
-    printf 'deb [signed-by=%s] https://nginx.org/packages/%s/debian %s nginx\n' \
-        "$NGINX_KEYRING" "$channel" "$codename" > "$source_tmp"
+    printf 'deb [signed-by=%s] %s %s nginx\n' \
+        "$NGINX_KEYRING" "$channel_url" "$codename" > "$source_tmp"
     printf 'Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n' \
         > "$pin_tmp"
     install -m 0644 "$source_tmp" "$NGINX_SOURCE"
@@ -208,10 +197,10 @@ configure_nginx_repository() {
 upgrade_nginx() {
     local requested=$1 channel=$2 version current_version target_release
     [[ -x /usr/sbin/nginx ]] || fail "Nginx is not installed at /usr/sbin/nginx."
+    confirm_risk "Nginx"
     printf 'Current Nginx version and build options:\n'
     /usr/sbin/nginx -V
     /usr/sbin/nginx -t
-    backup_nginx_config
 
     configure_nginx_repository "$channel"
     version="$(resolve_package_version nginx "$requested" 0 nginx.org)"
@@ -220,23 +209,15 @@ upgrade_nginx() {
     target_release="${target_release%%-*}"
     dpkg --compare-versions "$target_release" gt "$current_version" ||
         fail "Requested Nginx version ${target_release} is not newer than the installed ${current_version}."
-    confirm_plan nginx "nginx=${version}"
-    run_confirmed_install "nginx=${version}"
+    print_apt_plan nginx "nginx=${version}"
+    run_apt_install "nginx=${version}"
 
+    systemctl daemon-reload
     /usr/sbin/nginx -t
-    systemctl reload nginx
+    systemctl restart nginx
     systemctl is-active --quiet nginx || fail "Nginx is not active after the upgrade."
     /usr/sbin/nginx -v
     printf 'Nginx upgraded to APT version %s.\n' "$version"
-}
-
-backup_php_config() {
-    local version=$1 backup
-    [[ -d "/etc/php/${version}" ]] || fail "PHP configuration not found: /etc/php/${version}"
-    backup="/root/php-${version}-backup-$(date +%F-%H%M%S).tar.gz"
-    tar -czf "$backup" -C / "etc/php/${version}"
-    chmod 0600 "$backup"
-    printf 'PHP config backup: %s\n' "$backup"
 }
 
 install_php_management_updates() {
@@ -259,6 +240,7 @@ upgrade_php() {
     local old_service_tmp previous_prefix previous_service
     local old_service_was_active=0 old_service_was_enabled=0
     local make_jobs package
+    confirm_risk "PHP (php.net source build)"
     if [[ -z "$requested" && -t 0 ]]; then
         read -r -p "PHP version from php.net (example: 8.4.17): " requested
     fi
@@ -303,9 +285,7 @@ upgrade_php() {
         fail "Could not determine the current PHP version."
     dpkg --compare-versions "$requested" gt "$current_version" ||
         fail "Requested PHP version ${requested} is not newer than the installed ${current_version}."
-    confirm_source_upgrade "PHP source" "$requested" "$prefix"
-
-    backup_php_config "$php_version"
+    print_source_plan "PHP source" "$requested" "$prefix"
     apt-get update
     apt-get install -y curl build-essential autoconf bison re2c pkg-config \
         libxml2-dev libsqlite3-dev libcurl4-openssl-dev libssl-dev libonig-dev \
@@ -482,29 +462,10 @@ EOF
     printf 'PHP-FPM upgraded from php.net to %s at %s.\n' "$requested" "$prefix"
 }
 
-backup_mysql_data() {
-    local backup_tmp backup
-    backup="/root/mysql-backup-$(date +%F-%H%M%S).sql.gz"
-    backup_tmp="${backup}.tmp"
-    umask 077
-    if ! mysqldump --user=root --all-databases --routines --events --triggers \
-        --hex-blob --single-transaction --quick | gzip -c > "$backup_tmp"; then
-        rm -f "$backup_tmp"
-        printf 'Socket/default-credential dump failed; retrying with a password prompt.\n' >&2
-        if ! mysqldump --user=root --password --all-databases --routines --events \
-            --triggers --hex-blob --single-transaction --quick | gzip -c > "$backup_tmp"; then
-            rm -f "$backup_tmp"
-            fail "MySQL backup failed; upgrade aborted."
-        fi
-    fi
-    mv "$backup_tmp" "$backup"
-    chmod 0600 "$backup"
-    printf 'MySQL backup: %s\n' "$backup"
-}
-
 upgrade_mysql() {
     local requested=$1 version current_version target_release
     [[ -x /usr/bin/mysql ]] || fail "MySQL client not found at /usr/bin/mysql."
+    confirm_risk "MySQL"
     grep -Fq 'repo.mysql.com/apt/debian' /etc/apt/sources.list.d/mysql.list ||
         fail "Oracle MySQL APT repository is not configured; run install.sh first."
     [[ -r /usr/share/keyrings/mysql-apt.gpg ]] ||
@@ -517,9 +478,9 @@ upgrade_mysql() {
     target_release="${version#*:}"
     dpkg --compare-versions "$target_release" gt "$current_version" ||
         fail "Requested MySQL package version ${version} is not newer than the installed ${current_version:-unknown}."
-    confirm_plan MySQL "mysql-server=${version}"
-    backup_mysql_data
-    run_confirmed_install "mysql-server=${version}"
+    print_apt_plan MySQL "mysql-server=${version}"
+    run_apt_install "mysql-server=${version}"
+    systemctl daemon-reload
     systemctl restart mysql
     systemctl is-active --quiet mysql || fail "MySQL is not active after the upgrade."
     /usr/bin/mysql --version
@@ -555,6 +516,7 @@ if [[ "${1:-}" == --yes ]]; then
 fi
 
 if (($# == 0)); then
+    [[ -t 0 ]] || fail "No component specified and no interactive terminal; pass a component and an explicit version."
     show_menu
     requested=
     channel=stable
@@ -588,8 +550,11 @@ else
     esac
 fi
 
-if ((AUTO_CONFIRM)) && [[ -z "$requested" ]]; then
-    fail "--yes requires an explicit version."
+if [[ -z "$requested" ]] && { ((AUTO_CONFIRM)) || [[ ! -t 0 ]]; }; then
+    fail "A version must be specified explicitly when --yes is used or when there is no interactive terminal."
+fi
+if [[ ! -t 0 ]] && ! ((AUTO_CONFIRM)); then
+    fail "Non-interactive upgrades require --yes; otherwise the script would change package sources before refusing to install."
 fi
 
 require_root
