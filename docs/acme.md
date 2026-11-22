@@ -54,6 +54,11 @@ journalctl -u lnmp-acme-renew.service -n 50
 
 成功时输出包含证书写入 `/etc/nginx/ssl/<域名>/` 的路径提示，以及 `Running renew hook: 'systemctl reload nginx'`。其中 `'/home/wwwroot/default' does not contain 'dns'`、`The NOTIFY_HOOK is empty` 为无害提示，非错误。
 
+## 自动更新脚本本身
+```sh
+/usr/bin/acme.sh --home /usr/local/acme.sh --upgrade --auto-upgrade
+```
+
 ## 参数解读
 [link](https://github.com/acmesh-official/acme.sh/wiki/How-to-install#4-advanced-installation)
 
@@ -64,3 +69,11 @@ journalctl -u lnmp-acme-renew.service -n 50
 --accountkey is the file saving your account private key. By default, it's saved in --config-home.
 --useragent is the user-agent header value used to send to Let's Encrypt.
 --nocron install acme.sh without cronjob
+
+### acme 生成的证书路径
+```
+/usr/local/acme.sh/account.conf                # 全局配置、DNS API 凭据
+/etc/nginx/ssl/<域名>/<域名>.conf               # 域名续期记录
+/etc/nginx/ssl/<域名>/fullchain.cer            # 实际给 Nginx 用的证书
+/etc/nginx/ssl/<域名>/<域名>.key
+```
