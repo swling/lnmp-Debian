@@ -3,10 +3,11 @@
 ```sh
 sudo install -d -m 700 /home/bf
 
-sudo tar -czpf /home/bf/nginx-conf.tar.gz -C /etc/nginx
-sudo tar -czpf /home/bf/php-conf.tar.gz -C /etc/php/8.4
-sudo tar -czpf /home/bf/mysql-conf.tar.gz -C /etc/mysql
-sudo tar -czpf /home/bf/acme.sh-backup.tar.gz -C /usr/local acme.sh
+sudo tar -czpf /home/bf/nginx-conf.tar.gz /etc/nginx
+sudo tar -czpf /home/bf/php-conf.tar.gz /etc/php/8.4
+sudo tar -czpf /home/bf/mysql-conf.tar.gz /etc/mysql
+sudo tar -czpf /home/bf/redis-conf.tar.gz /etc/redis/redis.conf
+sudo tar -czpf /home/bf/acme.sh-backup.tar.gz /usr/local/acme.sh
 ```
 
 恢复前先备份目标服务器当前配置，再从备份中**按需覆盖**，不要先删除配置目录：
@@ -15,6 +16,8 @@ sudo tar -czpf /home/bf/acme.sh-backup.tar.gz -C /usr/local acme.sh
 sudo tar -xzpf /home/bf/nginx-conf.tar.gz -C /
 sudo tar -xzpf /home/bf/php-conf.tar.gz -C /
 sudo tar -xzpf /home/bf/mysql-conf.tar.gz -C /
+sudo tar -xzpf /home/bf/redis-conf.tar.gz -C /
+sudo tar -xzpf /home/bf/acme.sh-backup.tar.gz -C /
 ```
 
 恢复 Nginx 时，只取需要的公共配置；不同服务器的站点配置应单独核对，不要盲目覆盖。恢复后至少运行 `sudo nginx -t`，并检查对应版本的 PHP-FPM 配置及相关服务状态，再重载或重启服务。
