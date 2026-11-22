@@ -204,6 +204,7 @@ EOF
 add_vhost() {
     local domain more_names webroot rewrite allow_rewrite pathinfo_choice php_config
     local ipv6_choice ipv6_listen access_choice access_line name
+    local ssl_choice ssl_source ssl_cert ssl_key ssl_ca
     local -a additional_names rewrite_profiles
     require_root
     require_nginx
@@ -258,6 +259,25 @@ add_vhost() {
 
     create_vhost_config "$domain" "$domain $more_names" "$webroot" "$rewrite" \
         "$php_config" "$ipv6_listen" "$access_line"
+
+    read -r -p "Add an SSL certificate now? [y/N]: " ssl_choice
+    [[ "$ssl_choice" =~ ^[Yy]$ ]] || return 0
+    printf "1: Let's Encrypt\n"
+    printf '2: ZeroSSL\n'
+    read -r -p "Enter 1 or 2: " ssl_source
+    case "$ssl_source" in
+        1) ssl_ca=letsencrypt ;;
+        2) ssl_ca=zerossl ;;
+        *) fail "Choose 1 or 2." ;;
+    esac
+    [[ "$domain" != \*.* ]] || fail "Wildcard certificates require lnmp dnsssl."
+    CERT_DOMAIN="$domain"
+    CERT_MORE="$more_names"
+    # 新 vhost 的 webroot 已知，直接使用，不重复询问。
+    issue_certificate webroot "" "$ssl_ca" "$webroot"
+    ssl_cert="${SSL_DIR}/${domain}/fullchain.cer"
+    ssl_key="${SSL_DIR}/${domain}/${domain}.key"
+    print_config_hint "$ssl_cert" "$ssl_key"
 }
 
 list_vhosts() {
@@ -311,54 +331,25 @@ collect_email() {
         fail "A valid email address is required."
 }
 
-append_ssl_config() {
-    local domain=$1 names=$2 cert=$3 key=$4 config="${VHOST_DIR}/${1}.conf"
-    local webroot rewrite php_include backup
-    [[ -f "$config" ]] || fail "Create the virtual host first: lnmp vhost add"
-    if grep -Eq 'listen[[:space:]]+443' "$config"; then
-        fail "An HTTPS server block already exists for $domain."
-    fi
+# 从已有 vhost 配置中读取 root，避免证书签发流程再询问站点目录。
+vhost_webroot() {
+    local domain=$1 config="${VHOST_DIR}/${1}.conf" webroot
+    [[ -f "$config" ]] || fail "Virtual host not found: $domain. Create it first with: lnmp vhost add"
     webroot="$(awk '/^[[:space:]]*root[[:space:]]+/ {print $2; exit}' "$config" | tr -d ';')"
     [[ -n "$webroot" ]] || fail "Could not find a root directive in $config."
-    rewrite="$(grep -m1 -E '^[[:space:]]*include[[:space:]]+rewrite/[^;]+;' "$config" || true)"
-    rewrite="${rewrite:-include rewrite/none.conf;}"
-    # Reuse the HTTP block's PHP include so HTTPS keeps the same pathinfo mode.
-    php_include="$(grep -m1 -E '^[[:space:]]*include[[:space:]]+snippets/enable-php(-pathinfo)?\.conf;' "$config" || true)"
-    php_include="${php_include:-include snippets/enable-php.conf;}"
-    backup="$(mktemp)"
-    cp -p "$config" "$backup"
-    cat >> "$config" <<EOF
-
-server
-{
-    listen 443 ssl;
-    server_name ${names};
-    index index.html index.htm index.php;
-    root ${webroot};
-
-    ssl_certificate ${cert};
-    ssl_certificate_key ${key};
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-
-    ${rewrite}
-    ${php_include}
-
-    location ~ /\\. {
-        deny all;
-    }
+    printf '%s\n' "$webroot"
 }
-EOF
-    if ! /usr/sbin/nginx -t; then
-        mv "$backup" "$config"
-        fail "Nginx rejected the HTTPS config; the previous virtual host config was restored."
-    fi
-    if ! systemctl reload nginx; then
-        mv "$backup" "$config"
-        fail "Nginx reload failed; the previous virtual host config was restored."
-    fi
-    rm -f "$backup"
+
+print_cert_paths() {
+    printf 'Certificate: %s\nPrivate key: %s\n' "$1" "$2"
+}
+
+# 证书流程只落盘证书，不改写 vhost；明确提示用户自行添加 HTTPS 配置。
+print_config_hint() {
+    printf 'Nginx configuration was not modified. To enable HTTPS, add a 443 server block to the vhost with:\n'
+    printf '    ssl_certificate %s;\n' "$1"
+    printf '    ssl_certificate_key %s;\n' "$2"
+    printf 'Then check and reload Nginx yourself: nginx -t && systemctl reload nginx\n'
 }
 
 ensure_acme_renewal_timer() {
@@ -409,8 +400,8 @@ issue_certificate() {
 
     if [[ "$challenge" == webroot ]]; then
         [[ "$CERT_DOMAIN" != \*.* ]] || fail "Wildcard certificates require DNS validation."
-        read -r -p "Web root [${WEB_ROOT}/${CERT_DOMAIN}]: " webroot
-        webroot="${webroot:-${WEB_ROOT}/${CERT_DOMAIN}}"
+        # 不询问目录：显式传入的 webroot 优先，否则从已有 vhost 的 root 读取。
+        [[ -n "$webroot" ]] || webroot="$(vhost_webroot "$CERT_DOMAIN")"
         [[ -d "$webroot" ]] || fail "Web root does not exist: $webroot"
         "$ACME_BIN" --home "$ACME_HOME" --register-account -m "$CERT_EMAIL" --server "$ca"
         "$ACME_BIN" --home "$ACME_HOME" --certhome "$ACME_CERT_HOME" --issue --server "$ca" \
@@ -434,45 +425,34 @@ issue_certificate() {
     cert="${cert_dir}/fullchain.cer"
     key="${cert_dir}/${CERT_DOMAIN}.key"
     [[ -s "$cert" && -s "$key" ]] || fail "ACME client did not install the certificate files."
-    systemctl reload nginx
-    if [[ "$challenge" == webroot ]]; then
-        append_ssl_config "$CERT_DOMAIN" "$CERT_NAMES" "$cert" "$key"
-    fi
-    printf 'Certificate: %s\nPrivate key: %s\n' "$cert" "$key"
+    # 不改动 Nginx 配置，也不自动 reload；是否 reload 交由用户决定。
+    # 续签后的 reload 仍由签发时的 --renew-hook 负责。
+    print_cert_paths "$cert" "$key"
 }
 
 ssl_add() {
-    local choice cert key ca
+    local choice cert key ca webroot
     require_root
     require_nginx
     collect_cert_domains
-    [[ -f "${VHOST_DIR}/${CERT_DOMAIN}.conf" ]] ||
-        fail "Virtual host not found. Create it first with: lnmp vhost add"
-    printf '1: Use your own SSL certificate and key\n'
-    printf '2: Let us Encrypt\n'
-    printf '3: BuyPass\n'
-    printf '4: ZeroSSL\n'
-    read -r -p "Enter 1, 2, 3 or 4: " choice
+    webroot="$(vhost_webroot "$CERT_DOMAIN")"
+    printf "1: Let's Encrypt\n"
+    printf '2: ZeroSSL\n'
+    read -r -p "Enter 1 or 2: " choice
     case "$choice" in
-        1)
-            read -r -p "Full path to certificate: " cert
-            read -r -p "Full path to private key: " key
-            [[ -s "$cert" && -s "$key" ]] || fail "Certificate or key file does not exist."
-            append_ssl_config "$CERT_DOMAIN" "$CERT_NAMES" "$cert" "$key"
-            ;;
-        2) ca=letsencrypt ;;
-        3) ca=buypass ;;
-        4) ca=zerossl ;;
-        *) fail "Choose 1, 2, 3, or 4." ;;
+        1) ca=letsencrypt ;;
+        2) ca=zerossl ;;
+        *) fail "Choose 1 or 2." ;;
     esac
-    if [[ "$choice" != 1 ]]; then
-        [[ "$CERT_DOMAIN" != \*.* ]] || fail "Wildcard certificates require lnmp dnsssl."
-        issue_certificate webroot "" "$ca"
-    fi
+    [[ "$CERT_DOMAIN" != \*.* ]] || fail "Wildcard certificates require lnmp dnsssl."
+    issue_certificate webroot "" "$ca" "$webroot"
+    cert="${SSL_DIR}/${CERT_DOMAIN}/fullchain.cer"
+    key="${SSL_DIR}/${CERT_DOMAIN}/${CERT_DOMAIN}.key"
+    print_config_hint "$cert" "$key"
 }
 
 dns_ssl() {
-    local provider=$1 mode=${2:-enable} challenge=dns ca choice
+    local provider=$1 challenge=dns ca choice
     require_root
     require_nginx
     case "$provider" in
@@ -488,13 +468,7 @@ dns_ssl() {
     esac
     collect_email
     issue_certificate "$challenge" "$provider" "$ca"
-    if [[ "$mode" == onlyssl ]]; then
-        return
-    fi
-    [[ -f "${VHOST_DIR}/${CERT_DOMAIN}.conf" ]] ||
-        fail "Certificate issued. Create a virtual host before enabling HTTPS."
-    append_ssl_config "$CERT_DOMAIN" "$CERT_NAMES" \
-        "${SSL_DIR}/${CERT_DOMAIN}/fullchain.cer" \
+    print_config_hint "${SSL_DIR}/${CERT_DOMAIN}/fullchain.cer" \
         "${SSL_DIR}/${CERT_DOMAIN}/${CERT_DOMAIN}.key"
 }
 
@@ -553,13 +527,9 @@ case "${1:-}" in
             *) usage >&2; exit 2 ;;
         esac
         ;;
-    dnsssl|dns)
+    dnsssl|dns|onlyssl)
         [[ $# -eq 2 ]] || { usage >&2; exit 2; }
         dns_ssl "$2"
-        ;;
-    onlyssl)
-        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
-        dns_ssl "$2" onlyssl
         ;;
     *)
         usage >&2

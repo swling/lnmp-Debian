@@ -2,10 +2,13 @@
 
 ## 证书签发与续签
 
-`lnmp ssl add` 支持自备证书、Let's Encrypt、BuyPass 和 ZeroSSL；证书与私钥位于 `/etc/nginx/ssl/<域名>/`。
-通过 ACME 签发证书时会启用 `lnmp-acme-renew.timer`，每天调用 `acme.sh --cron` 检查续签；证书更新后执行 Nginx reload。
+证书签发入口有两组：`lnmp ssl add`（已有 vhost，HTTP-01）和 `lnmp vhost add` 中选择添加证书；`lnmp dnsssl` / `lnmp dns` / `lnmp onlyssl`（DNS-01，后两者现为同义词，均只签发证书）。支持 Let's Encrypt 和 ZeroSSL；证书与私钥位于 `/etc/nginx/ssl/<域名>/`。BuyPass 已停止申请服务，自备证书选项也已移除。
+
+所有签发入口行为一致：**只负责签发/放置证书，不修改 vhost 配置或任何 Nginx conf，不自动 reload Nginx**；HTTP-01 也不会询问站点目录（webroot 从 vhost 的 `root` 读取，新建 vhost 则沿用创建时的目录）。命令结束后会打印证书与私钥路径，需要自行在 vhost 的 443 server 块中添加 `ssl_certificate` 与 `ssl_certificate_key`，确认配置后自行执行 `nginx -t && systemctl reload nginx`。
+
+通过 ACME 签发证书时会启用 `lnmp-acme-renew.timer`，每天调用 `acme.sh --cron` 检查续签；证书更新后由签发时的 `--renew-hook` 执行 Nginx reload。
 已有 ACME 证书的服务器可运行 `sudo lnmp ssl auto-renew` 一次启用定时检查。
-DNS-01 使用 Debian 的 `acme.sh` 包，需预先设置对应 DNS 服务商要求的 API 环境变量。自备证书不由脚本续签。
+DNS-01 使用 Debian 的 `acme.sh` 包，需预先设置对应 DNS 服务商要求的 API 环境变量。
 
 ## 检查续签定时任务
 
