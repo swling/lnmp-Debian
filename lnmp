@@ -127,6 +127,7 @@ service_action() {
             *) fail "Unsupported service action: $action" ;;
         esac
         printf '%s %s...\n' "$verb" "$label"
+        systemctl daemon-reload
         systemctl "$action" "$unit"
         printf '%s %s.\n' "$label" "$completed"
     fi

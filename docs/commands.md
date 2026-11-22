@@ -24,4 +24,6 @@ sudo ./sync-lnmp.sh
 
 `kill` 命令映射为 systemd 的正常停止操作，不会对服务进程发送不可恢复的强制终止信号。
 
+服务启动、停止、重启、重载前会先执行 `systemctl daemon-reload`，避免包升级后 unit 文件变化产生警告。
+
 `lnmp status` 会逐项显示 Nginx、MySQL 和 PHP-FPM 的 active/inactive 状态，不输出整机 systemd 状态详情。
