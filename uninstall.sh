@@ -158,7 +158,6 @@ LNMP Debian 卸载计划
 
 将保留（只警告，不处理，请自行决定）：
   - MySQL 数据目录: ${MYSQL_DATA_DIR}
-  - MySQL 初始数据备份: /var/lib/mysql.lnmp-debian.orig
   - 网站文件: ${WEB_ROOT}
   - SSL 证书: ${NGINX_DIR}/ssl
   - 全部虚拟主机配置: ${NGINX_DIR}/conf.d/（含 default.conf）
@@ -304,7 +303,7 @@ if [[ -L /var/lib/mysql ]]; then
 else
     info "/var/lib/mysql 不是软链，未做改动"
 fi
-warn "MySQL 数据目录 ${MYSQL_DATA_DIR} 与备份 /var/lib/mysql.lnmp-debian.orig 均保留，请自行处理。"
+warn "MySQL 数据目录 ${MYSQL_DATA_DIR} 保留，请自行处理。"
 
 # ---- 6. 删除 APT 仓库与密钥 ----
 step "删除 APT 仓库与密钥"
@@ -359,13 +358,12 @@ default.conf）均未处理，下次安装时 default.conf 会被直接覆盖。
 
 以下数据未被处理，请自行确认：
   数据库数据:     ${MYSQL_DATA_DIR}
-  数据库初始备份: /var/lib/mysql.lnmp-debian.orig
   网站文件:       ${WEB_ROOT}
   SSL 证书:       ${NGINX_DIR}/ssl
   站点配置:       ${NGINX_DIR}/conf.d/（含 default.conf）
   日志:           ${NGINX_LOG_DIR}
   ACME 程序目录:  ${ACME_HOME}
   ACME 证书目录:  ${ACME_CERT_HOME}（与 SSL 证书同目录）
-  残留备份:       *.lnmp-debian.orig（如 /var/lib/mysql.lnmp-debian.orig）
+  残留备份:       *.lnmp-debian.orig（如有）
 ================================================================
 EOF

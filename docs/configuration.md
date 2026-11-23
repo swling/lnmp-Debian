@@ -42,7 +42,7 @@ NGINX_CHANNEL="stable"
 | --- | --- |
 | 触发条件 | 首次安装前设置非默认 `MYSQL_DATA_DIR` |
 | 安装器动作 | 把 MySQL 初始化数据迁移到该目录 |
-| 备份 | 保留 `/var/lib/mysql.lnmp-debian.orig` |
+| 默认目录 | 把包初始化的数据复制到目标目录后删除 `/var/lib/mysql`，再在原位置建软链；不保留默认目录的快照 |
 | 卸载后重装 | `mysql-community-server` 未安装且 `MYSQL_DATA_DIR` 已有数据时，提示输入 `clear` 全新安装或终止；自定义目录在装包成功后清空，默认 `/var/lib/mysql` 确认后立即清空；不做复用判断 |
 | 已安装后更换 | 未安装 MySQL 包且该目录已有数据时会提示；选择清空后按新安装流程迁移，否则终止 |
 

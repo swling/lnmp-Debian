@@ -538,9 +538,8 @@ install_packages() {
 }
 
 configure_mysql_data_directory() {
-    local mysql_default_backup apparmor_local apparmor_parent
+    local apparmor_local apparmor_parent
     local mysql_current_real mysql_target_real
-    mysql_default_backup=/var/lib/mysql.lnmp-debian.orig
     mysql_current_real="$(readlink -f /var/lib/mysql 2>/dev/null || true)"
     mysql_target_real="$(readlink -f "$MYSQL_DATA_DIR" 2>/dev/null || true)"
 
@@ -548,16 +547,12 @@ configure_mysql_data_directory() {
        [[ "$mysql_current_real" != "$mysql_target_real" ]]; then
         # Stop the server before changing what /var/lib/mysql points to.
         systemctl stop mysql || true
-        # Keep the original backup name on the first install; use a timestamped
-        # one when a previous install already left a backup behind.
-        if [[ -e "$mysql_default_backup" ]]; then
-            mysql_default_backup="${mysql_default_backup}.$(date +%Y%m%d%H%M%S)"
-        fi
         mkdir -p "$MYSQL_DATA_DIR"
         if [[ -d /var/lib/mysql ]] && [[ ! -L /var/lib/mysql ]]; then
             cp -a /var/lib/mysql/. "$MYSQL_DATA_DIR"/
             chown -R mysql:mysql "$MYSQL_DATA_DIR"
-            mv /var/lib/mysql "$mysql_default_backup"
+            # The directory only holds data initialized by the package install.
+            rm -rf -- /var/lib/mysql
         elif [[ -L /var/lib/mysql ]]; then
             fail "/var/lib/mysql already points to another directory; refusing to move database files."
         fi
