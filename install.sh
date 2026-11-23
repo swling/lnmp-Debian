@@ -624,6 +624,32 @@ disable_nginx_access_log() {
     mv "$tmp" "$conf"
 }
 
+enable_nginx_sites_enabled() {
+    local conf=$1 tmp http_line
+    [[ -f "$conf" ]] || fail "Nginx main config not found: ${conf}"
+    if awk '
+        /^[[:space:]]*http[[:space:]]*\{/ { in_http = 1 }
+        in_http && /^[[:space:]]*include[[:space:]]+\/etc\/nginx\/sites-enabled\// {
+            found = 1
+            exit
+        }
+        /^}/ { in_http = 0 }
+        END { exit(found ? 0 : 1) }
+    ' "$conf"; then
+        return
+    fi
+    http_line="$(awk '/^[[:space:]]*http[[:space:]]*\{/ { print NR; exit }' "$conf")"
+    [[ -n "$http_line" ]] ||
+        fail "Cannot find the http block in ${conf}; refusing to add the sites-enabled include."
+    tmp="$(mktemp "${conf}.XXXXXX")"
+    awk -v http_line="$http_line" '
+        { print }
+        NR == http_line { print "    include /etc/nginx/sites-enabled/*;" }
+    ' "$conf" > "$tmp"
+    chmod --reference="$conf" "$tmp"
+    mv "$tmp" "$conf"
+}
+
 install_shared_nginx_conf() {
     local source_dir=$1 target_dir=$2 source target name
     [[ -d "$source_dir" ]] || fail "Bundled Nginx config directory is missing: ${source_dir}"
@@ -697,6 +723,9 @@ EOF
         # Disable the http-level access log by default. Virtual hosts with an
         # explicit access_log directive can still opt in to logging.
         disable_nginx_access_log "$nginx_conf"
+        # nginx.org packages only include conf.d; keep the Debian-style
+        # sites-enabled layout used by this project working.
+        enable_nginx_sites_enabled "$nginx_conf"
     fi
 
     nginx_default_available="${NGINX_CONFIG_DIR}/sites-available/default"

@@ -65,7 +65,7 @@ NGINX_CHANNEL="stable"
 
 | 主题 | 说明 |
 | --- | --- |
-| 配置路径策略 | 使用 Debian 软件包的原生配置和程序路径，**不创建**旧版 `/usr/local` 配置路径的兼容链接 |
+| 配置路径策略 | Nginx 使用 nginx.org 官方包，但保留 Debian 风格的 `sites-available` / `sites-enabled` 布局；安装器会在 `nginx.conf` 的 `http` 块中显式加入 `include /etc/nginx/sites-enabled/*;`，确保新包默认只加载 `conf.d` 时站点配置仍然生效。不创建旧版 `/usr/local` 配置路径的兼容链接 |
 | 访问日志 | 安装器在 `nginx.conf` 的 `http` 块中设置 `access_log off;`；默认站点及未显式配置访问日志的 vhost 不写日志，`lnmp vhost add` 中启用访问日志的站点在自己的 server 块写入独立 `access_log` 并覆盖该默认值 |
 | 通用片段部署 | 项目 `conf/` 目录中的片段（目前为 `cache-static.conf`）复制到 `/etc/nginx/conf/`，该目录不被 `nginx.conf` 自动加载；已有同名片段不覆盖 |
 | 新 vhost | 自动 `include conf/cache-static.conf;`，不再生成重复的静态文件 location 块；已有主机需自行添加该 include 并移除重叠的静态 location |
