@@ -4,6 +4,27 @@
 > 文中 `8.4` 仅作示例：PHP 版本由安装时从 APT 检测决定，实际路径中的版本号随之变化。
 > 网站根目录、日志目录等可由 `/etc/lnmp-debian.conf` 覆盖，下表为默认值。
 
+## 关键路径速查
+
+| 用途 | 路径 | 来源 |
+| --- | --- | --- |
+| 用户配置入口 | `/etc/lnmp-debian.conf` | `[LNMP]` |
+| 内部状态 | `/etc/lnmp-debian/` | `[LNMP]` |
+| Nginx 主配置 | `/etc/nginx/nginx.conf` | 默认 |
+| 虚拟主机配置 | `/etc/nginx/sites-available/<域名>.conf` | `[LNMP]` |
+| 已启用站点 | `/etc/nginx/sites-enabled/<域名>.conf` | `[LNMP]` 软链 |
+| PHP 片段 | `/etc/nginx/snippets/` | `[LNMP]` |
+| 伪静态规则 | `/etc/nginx/rewrite/` | `[LNMP]` |
+| 证书目录 | `/etc/nginx/ssl/<域名>/` | `[LNMP]` |
+| PHP-FPM 配置 | `/etc/php/<版本>/fpm/` | 默认 |
+| MySQL 配置 | `/etc/mysql/` | 默认 |
+| MySQL 数据 | `/var/lib/mysql/` | 默认，可软链到自定义目录 |
+| PHP-FPM socket | `/run/php/php<版本>-fpm.sock` | 运行时 |
+| 管理脚本 | `/usr/local/bin/lnmp`、`/usr/local/bin/addons.sh` | `[LNMP]` |
+| 网站根目录 | `/home/wwwroot/` | 自定义示例 |
+
+## 完整目录树
+
 /
 │
 ├── etc/                                  # 系统配置文件

@@ -2,6 +2,17 @@
 
 安装前编辑目录中的 [lnmp-debian.conf](../lnmp-debian.conf)，或安装后编辑 `/etc/lnmp-debian.conf`：
 
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `WEB_ROOT` | `/home/wwwroot` | 新建虚拟主机的默认父目录 |
+| `DEFAULT_WEB_ROOT` | `${WEB_ROOT}/default` | 未匹配域名时的默认站点目录 |
+| `NGINX_LOG_DIR` | `/var/log/nginx` | Nginx 日志目录 |
+| `MYSQL_DATA_DIR` | `/var/lib/mysql` | MySQL 数据目录 |
+| `PHP_VERSION` | 空 | 留空则交互选择 APT 中可用版本 |
+| `NGINX_VERSION` | 空 | 同上 |
+| `MYSQL_VERSION` | 空 | 同上 |
+| `NGINX_CHANNEL` | `stable` | nginx.org 通道：`stable` / `mainline`；安装时选源，升级时也可用命令参数覆盖 |
+
 ```sh
 WEB_ROOT="/home/wwwroot"
 DEFAULT_WEB_ROOT="/home/wwwroot/default"
@@ -10,16 +21,55 @@ MYSQL_DATA_DIR="/var/lib/mysql"
 PHP_VERSION=""
 NGINX_VERSION=""
 MYSQL_VERSION=""
+NGINX_CHANNEL="stable"
 ```
 
-`WEB_ROOT` 是新建虚拟主机的默认父目录；`DEFAULT_WEB_ROOT` 是未匹配域名时的默认站点目录；`MYSQL_DATA_DIR` 是 MySQL 数据目录。版本变量留空时安装器交互选择 APT 中可用的版本；也可设为版本选择菜单列出的确切值。首次安装前设置非默认 `MYSQL_DATA_DIR` 时，安装器会把 MySQL 初始化数据迁移到该目录，并保留 `/var/lib/mysql.lnmp-debian.orig` 备份。已安装后更换数据目录需先按 MySQL 的数据迁移流程操作，安装器会拒绝覆盖已有数据。
+## 版本变量规则
 
-## Debian 配置路径
+| 组件 | 版本来源 | 留空时 | 非留空时 |
+| --- | --- | --- | --- |
+| PHP | Debian APT | 交互选择，默认最新 | 作为菜单默认，须为菜单中的确切值 |
+| Nginx | nginx.org APT | 交互选择，默认最新 | 作为菜单默认，须为菜单中的确切值 |
+| MySQL | Oracle APT | 交互选择，默认最高 LTS | 作为菜单默认，须为菜单中的确切值 |
 
-安装器使用 Debian 软件包的原生配置和程序路径，不创建旧版 `/usr/local` 配置路径的兼容链接。Nginx 主配置位于 `/etc/nginx/nginx.conf`，虚拟主机使用 Debian 的 `sites-available` / `sites-enabled` 布局，PHP 和 rewrite 片段位于 `/etc/nginx/snippets` 与 `/etc/nginx/rewrite`，证书位于 `/etc/nginx/ssl`。PHP-FPM 配置位于 `/etc/php/<版本>/fpm`，MySQL 沿用 Debian 默认的 `/etc/mysql` 配置目录（仅当 `MYSQL_DATA_DIR` 设为非默认值时，安装器会写入 `/etc/mysql/mysql.conf.d/zz-lnmp-debian.cnf` 指定数据目录），默认数据目录为 `/var/lib/mysql`，Nginx 日志默认位于 `/var/log/nginx`。安装器会在 `/etc/nginx/nginx.conf` 的 `http` 块中设置 `access_log off;`，因此默认站点及未显式配置访问日志的虚拟主机不会写访问日志；在 `lnmp vhost add` 中启用访问日志的站点仍会在自己的 server 块里写入独立的 `access_log` 指令并覆盖该默认值。安装器还会把项目 `conf/` 目录中的通用配置片段（目前为 `cache-static.conf`）复制到 `/etc/nginx/conf/`；该目录不会被 `nginx.conf` 自动加载，需要在 server 块里自行 `include conf/cache-static.conf;` 才会生效。已存在的同名片段不会被覆盖，方便保留自定义修改。新建虚拟主机会在 server 块中自动 `include conf/cache-static.conf;`，不再生成重复的静态文件 location 块；已有主机如需使用需自行添加该 include 并移除重叠的静态 location。
+- MySQL 不写死版本：安装器动态发现 Oracle 仓库全部 Server 组件，菜单标注 LTS / 创新版，默认选版本最高的 LTS。
+- 非留空值若不在菜单中，安装器报错退出，不回退。
 
-默认网站目录为 `/home/wwwroot/default`。安装器直接从 [conf/default-site.conf](../conf/default-site.conf) 部署默认站点配置，并按 `DEFAULT_WEB_ROOT` 设置根目录、`index.php` 和 PHP-FPM 处理。Debian 原始默认配置会在旁边保留 `.lnmp-debian.orig` 备份；如果检测到自定义默认站点，安装器会停止并说明原因，不会覆盖。
+## MySQL 数据目录迁移
 
-每个虚拟主机的完整配置为 `/etc/nginx/sites-available/<域名>.conf`，并通过 `/etc/nginx/sites-enabled/<域名>.conf` 符号链接启用（链接指向 `../sites-available/<域名>.conf`）。默认站点的对应路径为 `/etc/nginx/sites-available/default` 与 `/etc/nginx/sites-enabled/default`。伪静态规则位于 `/etc/nginx/rewrite/<名称>.conf`，PHP 处理片段位于 `/etc/nginx/snippets/`（如 `enable-php.conf`、`enable-php-pathinfo.conf`、`pathinfo.conf`）；HTTPS 证书与私钥位于 `/etc/nginx/ssl/<域名>/`。
+| 项目 | 说明 |
+| --- | --- |
+| 触发条件 | 首次安装前设置非默认 `MYSQL_DATA_DIR` |
+| 安装器动作 | 把 MySQL 初始化数据迁移到该目录 |
+| 备份 | 保留 `/var/lib/mysql.lnmp-debian.orig` |
+| 已安装后更换 | 需先按 MySQL 的数据迁移流程手动操作，安装器会拒绝覆盖已有数据 |
 
-Socket 与运行约定：Nginx 和 PHP-FPM 使用同一个版本化 socket：`/run/php/php<版本>-fpm.sock`；socket 属主/属组应为 `www:www`，权限为 `0660`。安装器会显式写入 FPM pool 的 socket 设置并关闭会覆盖属主/属组的 ACL 设置，然后在启动服务后检查 socket。
+## 路径速查
+
+| 用途 | 路径 |
+| --- | --- |
+| Nginx 主配置 | `/etc/nginx/nginx.conf` |
+| 站点配置 | `/etc/nginx/sites-available/<域名>.conf`、`/etc/nginx/sites-enabled/<域名>.conf`（软链指向 `../sites-available/<域名>.conf`） |
+| 默认站点 | `/etc/nginx/sites-available/default`、`/etc/nginx/sites-enabled/default` |
+| Nginx 复用片段 | `/etc/nginx/snippets/`（`enable-php.conf`、`enable-php-pathinfo.conf`、`pathinfo.conf`） |
+| 伪静态规则 | `/etc/nginx/rewrite/<名称>.conf` |
+| 通用配置片段 | `/etc/nginx/conf/`，需自行 `include conf/cache-static.conf;` |
+| SSL 证书与私钥 | `/etc/nginx/ssl/<域名>/` |
+| PHP-FPM 配置 | `/etc/php/<版本>/fpm` |
+| MySQL 配置 | `/etc/mysql`（自定义数据目录时写入 `mysql.conf.d/zz-lnmp-debian.cnf`） |
+| MySQL 数据 | `/var/lib/mysql`（默认），自定义时按 `MYSQL_DATA_DIR` |
+| Nginx 日志 | `/var/log/nginx`（默认） |
+| PHP-FPM socket | `/run/php/php<版本>-fpm.sock`，属主 `www:www`，权限 `0660` |
+
+## 配置行为要点
+
+| 主题 | 说明 |
+| --- | --- |
+| 配置路径策略 | 使用 Debian 软件包的原生配置和程序路径，**不创建**旧版 `/usr/local` 配置路径的兼容链接 |
+| 访问日志 | 安装器在 `nginx.conf` 的 `http` 块中设置 `access_log off;`；默认站点及未显式配置访问日志的 vhost 不写日志，`lnmp vhost add` 中启用访问日志的站点在自己的 server 块写入独立 `access_log` 并覆盖该默认值 |
+| 通用片段部署 | 项目 `conf/` 目录中的片段（目前为 `cache-static.conf`）复制到 `/etc/nginx/conf/`，该目录不被 `nginx.conf` 自动加载；已有同名片段不覆盖 |
+| 新 vhost | 自动 `include conf/cache-static.conf;`，不再生成重复的静态文件 location 块；已有主机需自行添加该 include 并移除重叠的静态 location |
+| 默认站点部署 | 从 [conf/default-site.conf](../conf/default-site.conf) 部署，按 `DEFAULT_WEB_ROOT` 设置根目录、`index.php` 和 PHP-FPM 处理；Debian 原始配置旁保留 `.lnmp-debian.orig` 备份，检测到自定义默认站点则停止安装 |
+| Socket 约定 | Nginx 与 PHP-FPM 共用同一个版本化 socket；安装器显式写入 FPM pool 的 socket 设置、关闭会覆盖属主/属组的 ACL 设置，并在启动服务后检查 socket |
+
+更完整的目录树见 [Debian LNMP 目录结构速查表](../nmp-path.md)。
