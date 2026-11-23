@@ -4,7 +4,7 @@
 sudo install -d -m 700 /home/bf
 
 sudo tar -czpf /home/bf/nginx-conf.tar.gz /etc/nginx
-sudo tar -czpf /home/bf/php-conf.tar.gz /etc/php/8.4
+sudo tar -czpf /home/bf/php-fpm-conf.tar.gz /etc/php/8.4/fpm/
 sudo tar -czpf /home/bf/mysql-conf.tar.gz /etc/mysql
 sudo tar -czpf /home/bf/redis-conf.tar.gz /etc/redis/redis.conf
 sudo tar -czpf /home/bf/acme.sh-backup.tar.gz /usr/local/acme.sh
@@ -14,7 +14,7 @@ sudo tar -czpf /home/bf/acme.sh-backup.tar.gz /usr/local/acme.sh
 
 ```sh
 sudo tar -xzpf /home/bf/nginx-conf.tar.gz -C /
-sudo tar -xzpf /home/bf/php-conf.tar.gz -C /
+sudo tar -xzpf /home/bf/php-fpm-conf.tar.gz -C /
 sudo tar -xzpf /home/bf/mysql-conf.tar.gz -C /
 sudo tar -xzpf /home/bf/redis-conf.tar.gz -C /
 sudo tar -xzpf /home/bf/acme.sh-backup.tar.gz -C /

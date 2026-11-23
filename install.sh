@@ -35,6 +35,7 @@ MYSQL_VERSION="${MYSQL_VERSION:-}"
 NGINX_CONFIG_DIR=/etc/nginx
 NGINX_SNIPPET_DIR="${NGINX_CONFIG_DIR}/snippets"
 REWRITE_DIR="${NGINX_CONFIG_DIR}/rewrite"
+CLEAR_MYSQL_DATA=0
 
 usage() {
     cat <<'EOF'
@@ -55,6 +56,14 @@ EOF
 fail() {
     printf 'Error: %s\n' "$*" >&2
     exit 1
+}
+
+warn() {
+    printf 'WARNING: %s\n' "$*" >&2
+}
+
+info() {
+    printf '  - %s\n' "$*"
 }
 
 list_package_versions() {
@@ -92,8 +101,9 @@ select_package_version() {
                 break
             fi
         done
+        # Fall back to an available version when the configured one is no longer in the repo.
         [[ "${versions[default_index]}" == "$configured" ]] ||
-            fail "${label} version ${configured} is not available for ${package}."
+            warn "${label} version ${configured} is no longer available for ${package}; using ${versions[default_index]}."
     fi
 
     printf '\nAvailable %s versions (%s):\n' "$label" "$package"
@@ -255,8 +265,9 @@ select_php_version() {
                 break
             fi
         done
+        # The configured branch may have been replaced on reinstall; warn and use an available one.
         [[ "${versions[default_index]}" == "$PHP_VERSION" ]] ||
-            fail "Configured PHP ${PHP_VERSION} is not available from APT."
+            warn "Configured PHP ${PHP_VERSION} is not available from APT; using ${versions[default_index]}."
     fi
 
     printf '\nAvailable PHP versions:\n'
@@ -355,13 +366,16 @@ install_nginx_repository() {
         mainline) channel_url="${NGINX_REPO_BASE}/mainline/debian" ;;
     esac
 
+    # Leftover APT source files no longer abort installation: back them up before overwriting.
     if [[ -e "$NGINX_SOURCE" ]] &&
        ! grep -Fq 'https://nginx.org/packages/' "$NGINX_SOURCE"; then
-        fail "Refusing to overwrite an unrelated APT source: $NGINX_SOURCE"
+        cp -p -- "$NGINX_SOURCE" "${NGINX_SOURCE}.lnmp-debian.orig" 2>/dev/null || true
+        warn "Existing APT source ${NGINX_SOURCE} is unrelated to nginx.org; backed up and overwritten."
     fi
     if [[ -e "$NGINX_PIN" ]] &&
        ! grep -Fq 'Pin: origin nginx.org' "$NGINX_PIN"; then
-        fail "Refusing to overwrite an unrelated APT preference: $NGINX_PIN"
+        cp -p -- "$NGINX_PIN" "${NGINX_PIN}.lnmp-debian.orig" 2>/dev/null || true
+        warn "Existing APT preference ${NGINX_PIN} is unrelated to nginx.org; backed up and overwritten."
     fi
 
     install -d -m 0755 /usr/share/keyrings "$(dirname "$NGINX_SOURCE")" "$(dirname "$NGINX_PIN")"
@@ -423,6 +437,35 @@ directory_has_entries() {
     [[ -n "$(find "$1" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]
 }
 
+clear_mysql_data() {
+    find "$MYSQL_DATA_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + ||
+        fail "Could not clear MYSQL_DATA_DIR (${MYSQL_DATA_DIR})."
+    info "Cleared MYSQL_DATA_DIR: ${MYSQL_DATA_DIR}"
+}
+
+confirm_clear_mysql_data() {
+    local answer
+    warn "MYSQL_DATA_DIR (${MYSQL_DATA_DIR}) already contains data."
+    warn "Continuing will DELETE all existing data in that directory and install a fresh MySQL instance."
+    read -r -p "Type 'clear' to delete the data and continue, or press Enter to abort: " answer || true
+    [[ "$answer" == clear ]] || fail "Installation aborted; MYSQL_DATA_DIR was left unchanged."
+    if [[ "$MYSQL_DATA_DIR" == /var/lib/mysql ]]; then
+        # The package initializes the default directory, so it must be empty
+        # before packages are installed.
+        clear_mysql_data
+    else
+        # Delay the deletion until packages are installed, so a failed install
+        # does not leave the machine with neither data nor a working stack.
+        CLEAR_MYSQL_DATA=1
+        info "Confirmed: MYSQL_DATA_DIR will be cleared after package installation."
+    fi
+}
+
+clear_mysql_data_if_confirmed() {
+    (( CLEAR_MYSQL_DATA )) || return 0
+    clear_mysql_data
+}
+
 validate_configuration_and_existing_data() {
     local configured_path
     for configured_path in "$WEB_ROOT" "$DEFAULT_WEB_ROOT" "$NGINX_LOG_DIR" "$MYSQL_DATA_DIR"; do
@@ -441,16 +484,9 @@ validate_configuration_and_existing_data() {
     if [[ "$mariadb_status" == installed ]]; then
         fail "MariaDB is already installed. Back it up and remove or migrate it before installing MySQL."
     fi
-    if [[ -d /var/lib/mysql ]] &&
-       directory_has_entries /var/lib/mysql &&
-       [[ "$mysql_community_status" != installed ]]; then
-        fail "Existing database files were found in /var/lib/mysql. Back them up and migrate them before installing."
-    fi
-    if [[ "$MYSQL_DATA_DIR" != /var/lib/mysql && -d "$MYSQL_DATA_DIR" ]] &&
-       directory_has_entries "$MYSQL_DATA_DIR" &&
-       [[ "$(readlink -f /var/lib/mysql 2>/dev/null || true)" != \
-          "$(readlink -f "$MYSQL_DATA_DIR" 2>/dev/null || true)" ]]; then
-        fail "MYSQL_DATA_DIR (${MYSQL_DATA_DIR}) already contains data and is not the active MySQL data directory."
+    if [[ "$mysql_community_status" != installed ]] &&
+       [[ -d "$MYSQL_DATA_DIR" ]] && directory_has_entries "$MYSQL_DATA_DIR"; then
+        confirm_clear_mysql_data
     fi
 }
 
@@ -459,21 +495,14 @@ prepare_package_sources() {
         install -m 0644 "$SCRIPT_DIR/lnmp-debian.conf" "$SYSTEM_CONFIG"
     fi
 
-    if [[ -f "$MYSQL_SOURCE" || -f "$NGINX_SOURCE" ]]; then
-        command -v curl >/dev/null ||
-            fail "A stale MySQL or Nginx APT source exists but curl is missing; install curl, then rerun this script."
-        command -v gpg >/dev/null ||
-            fail "A stale MySQL or Nginx APT source exists but gpg is missing; install gnupg, then rerun this script."
-        install_mysql_repository
-        install_nginx_repository
-        apt-get update
-    else
-        apt-get update
-        apt-get install -y ca-certificates curl gnupg
-        install_mysql_repository
-        install_nginx_repository
-        apt-get update
-    fi
+    # Leftover package sources no longer abort installation: install dependencies first,
+    # then rebuild the sources and refresh indexes.
+    apt-get update || warn "apt-get update failed; continuing to install source dependencies."
+    apt-get install -y ca-certificates curl gnupg ||
+        fail "Could not install ca-certificates / curl / gnupg; check APT sources and network."
+    install_mysql_repository
+    install_nginx_repository
+    apt-get update || warn "apt-get update failed after configuring sources; version list may be incomplete."
 }
 
 select_install_versions() {
@@ -509,14 +538,21 @@ install_packages() {
 }
 
 configure_mysql_data_directory() {
+    local mysql_default_backup apparmor_local apparmor_parent
+    local mysql_current_real mysql_target_real
+    mysql_default_backup=/var/lib/mysql.lnmp-debian.orig
+    mysql_current_real="$(readlink -f /var/lib/mysql 2>/dev/null || true)"
+    mysql_target_real="$(readlink -f "$MYSQL_DATA_DIR" 2>/dev/null || true)"
+
     if [[ "$MYSQL_DATA_DIR" != /var/lib/mysql ]] &&
-       [[ "$(readlink -f /var/lib/mysql 2>/dev/null || true)" != \
-          "$(readlink -f "$MYSQL_DATA_DIR" 2>/dev/null || true)" ]]; then
-        local mysql_default_backup apparmor_local apparmor_parent
-        mysql_default_backup=/var/lib/mysql.lnmp-debian.orig
-        [[ ! -e "$mysql_default_backup" ]] ||
-            fail "Database backup path already exists: ${mysql_default_backup}"
-        systemctl stop mysql
+       [[ "$mysql_current_real" != "$mysql_target_real" ]]; then
+        # Stop the server before changing what /var/lib/mysql points to.
+        systemctl stop mysql || true
+        # Keep the original backup name on the first install; use a timestamped
+        # one when a previous install already left a backup behind.
+        if [[ -e "$mysql_default_backup" ]]; then
+            mysql_default_backup="${mysql_default_backup}.$(date +%Y%m%d%H%M%S)"
+        fi
         mkdir -p "$MYSQL_DATA_DIR"
         if [[ -d /var/lib/mysql ]] && [[ ! -L /var/lib/mysql ]]; then
             cp -a /var/lib/mysql/. "$MYSQL_DATA_DIR"/
@@ -547,7 +583,8 @@ ${MYSQL_DATA_DIR}/** rwk,
 EOF
             fi
             if command -v apparmor_parser >/dev/null; then
-                apparmor_parser -r /etc/apparmor.d/usr.sbin.mysqld
+                apparmor_parser -r /etc/apparmor.d/usr.sbin.mysqld ||
+                    warn "Failed to reload AppArmor; run manually: apparmor_parser -r /etc/apparmor.d/usr.sbin.mysqld"
             elif systemctl is-active --quiet apparmor; then
                 fail "AppArmor is active but apparmor_parser is unavailable; cannot authorize MYSQL_DATA_DIR."
             fi
@@ -568,11 +605,10 @@ ensure_web_user() {
     fi
 }
 
-prepare_debian_layout() {
+prepare_nginx_layout() {
     mkdir -p "$NGINX_SNIPPET_DIR" "$REWRITE_DIR" \
-        "${NGINX_CONFIG_DIR}/conf" "${NGINX_CONFIG_DIR}/ssl" \
-        "${NGINX_CONFIG_DIR}/sites-available" \
-        "${NGINX_CONFIG_DIR}/sites-enabled" /run/php
+        "${NGINX_CONFIG_DIR}/conf.d" \
+        "${NGINX_CONFIG_DIR}/ssl" /run/php
     if [[ ! -d "$WEB_ROOT" ]]; then
         mkdir -p "$WEB_ROOT"
         chown www:www "$WEB_ROOT"
@@ -624,32 +660,6 @@ disable_nginx_access_log() {
     mv "$tmp" "$conf"
 }
 
-enable_nginx_sites_enabled() {
-    local conf=$1 tmp http_line
-    [[ -f "$conf" ]] || fail "Nginx main config not found: ${conf}"
-    if awk '
-        /^[[:space:]]*http[[:space:]]*\{/ { in_http = 1 }
-        in_http && /^[[:space:]]*include[[:space:]]+\/etc\/nginx\/sites-enabled\// {
-            found = 1
-            exit
-        }
-        /^}/ { in_http = 0 }
-        END { exit(found ? 0 : 1) }
-    ' "$conf"; then
-        return
-    fi
-    http_line="$(awk '/^[[:space:]]*http[[:space:]]*\{/ { print NR; exit }' "$conf")"
-    [[ -n "$http_line" ]] ||
-        fail "Cannot find the http block in ${conf}; refusing to add the sites-enabled include."
-    tmp="$(mktemp "${conf}.XXXXXX")"
-    awk -v http_line="$http_line" '
-        { print }
-        NR == http_line { print "    include /etc/nginx/sites-enabled/*;" }
-    ' "$conf" > "$tmp"
-    chmod --reference="$conf" "$tmp"
-    mv "$tmp" "$conf"
-}
-
 install_shared_nginx_conf() {
     local source_dir=$1 target_dir=$2 source target name
     [[ -d "$source_dir" ]] || fail "Bundled Nginx config directory is missing: ${source_dir}"
@@ -675,7 +685,8 @@ location ~ [^/]\.php(/|$)
     try_files \$uri =404;
     fastcgi_pass unix:/run/php/php${PHP_VERSION}-fpm.sock;
     fastcgi_index index.php;
-    include fastcgi.conf;
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
 }
 EOF
     fi
@@ -685,7 +696,8 @@ location ~ [^/]\.php(/|$)
 {
     fastcgi_pass unix:/run/php/php${PHP_VERSION}-fpm.sock;
     fastcgi_index index.php;
-    include fastcgi.conf;
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
     include snippets/pathinfo.conf;
 }
 EOF
@@ -713,49 +725,35 @@ EOF
         fi
     done
     # Deploy reusable snippets (e.g. cache-static.conf) so vhosts can include
-    # them from a server block with: include conf/cache-static.conf;
-    install_shared_nginx_conf "$SCRIPT_DIR/conf" "${NGINX_CONFIG_DIR}/conf"
-    local nginx_conf nginx_default_available nginx_default_enabled nginx_default_template nginx_default_temp
+    # them from a server block with: include cache-static.conf;
+    install_shared_nginx_conf "$SCRIPT_DIR/conf" "$NGINX_CONFIG_DIR"
+    local nginx_conf
     nginx_conf="${NGINX_CONFIG_DIR}/nginx.conf"
     if [[ -f "$nginx_conf" ]]; then
         cp -n "$nginx_conf" "${nginx_conf}.lnmp-debian.orig"
-        sed -i -E 's/^[[:space:]]*user[[:space:]]+www-data;/user www;/' "$nginx_conf"
+        # The nginx.org package ships "user nginx;", while the PHP-FPM socket
+        # is owned by www:www. Set the worker user to www so Nginx can use it.
+        if grep -qE '^[[:space:]]*user[[:space:]]+' "$nginx_conf"; then
+            sed -i -E 's/^[[:space:]]*user[[:space:]]+[^;]+;/user www;/' "$nginx_conf"
+        else
+            sed -i '1i user www;' "$nginx_conf"
+        fi
         # Disable the http-level access log by default. Virtual hosts with an
         # explicit access_log directive can still opt in to logging.
         disable_nginx_access_log "$nginx_conf"
-        # nginx.org packages only include conf.d; keep the Debian-style
-        # sites-enabled layout used by this project working.
-        enable_nginx_sites_enabled "$nginx_conf"
     fi
 
-    nginx_default_available="${NGINX_CONFIG_DIR}/sites-available/default"
-    nginx_default_enabled="${NGINX_CONFIG_DIR}/sites-enabled/default"
+    # nginx.org packages load conf.d/*.conf; the default site lives there too.
+    local nginx_default_config nginx_default_template nginx_default_temp
+    nginx_default_config="${NGINX_CONFIG_DIR}/conf.d/default.conf"
     nginx_default_template="$SCRIPT_DIR/conf/default-site.conf"
     [[ -s "$nginx_default_template" ]] ||
         fail "Default Nginx site template is missing: ${nginx_default_template}"
-    if [[ -L "$nginx_default_enabled" ]]; then
-        [[ "$(readlink -f "$nginx_default_enabled")" == "$nginx_default_available" ]] ||
-            fail "The enabled default site points elsewhere: ${nginx_default_enabled}"
-    elif [[ -e "$nginx_default_enabled" ]]; then
-        fail "A non-symlink default site already exists at ${nginx_default_enabled}."
-    fi
-    if [[ -f "$nginx_default_available" ]] &&
-       ! grep -Fq '# Managed by LNMP Debian.' "$nginx_default_available" &&
-       ! grep -Fq 'root /var/www/html;' "$nginx_default_available"; then
-        fail "A customized Debian default site already exists at ${nginx_default_available}; refusing to replace it."
-    fi
-    if [[ -f "$nginx_default_available" ]] &&
-       ! grep -Fq '# Managed by LNMP Debian.' "$nginx_default_available"; then
-        cp -n "$nginx_default_available" "${nginx_default_available}.lnmp-debian.orig"
-    fi
-    nginx_default_temp="$(mktemp "${nginx_default_available}.XXXXXX")"
+    nginx_default_temp="$(mktemp "${nginx_default_config}.XXXXXX")"
     sed "s#@DEFAULT_WEB_ROOT@#${DEFAULT_WEB_ROOT}#g" \
         "$nginx_default_template" > "$nginx_default_temp"
     chmod 0644 "$nginx_default_temp"
-    mv "$nginx_default_temp" "$nginx_default_available"
-    if [[ ! -L "$nginx_default_enabled" ]]; then
-        ln -s ../sites-available/default "$nginx_default_enabled"
-    fi
+    mv "$nginx_default_temp" "$nginx_default_config"
 }
 
 configure_php_fpm() {
@@ -847,9 +845,10 @@ main() {
     prepare_package_sources
     select_install_versions
     install_packages
+    clear_mysql_data_if_confirmed
     configure_mysql_data_directory
     ensure_web_user
-    prepare_debian_layout
+    prepare_nginx_layout
     configure_nginx
     configure_php_fpm
     install_management_commands

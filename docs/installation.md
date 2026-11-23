@@ -20,7 +20,7 @@ cd lnmp-debian
 | --- | --- |
 | 交互终端 | 列出版本并提示选择，可输入序号或确切版本字符串；直接回车采用默认值 |
 | 无交互终端 | 直接采用默认版本 |
-| 配置文件指定了版本 | 作为菜单默认项；若不在菜单中则报错退出，**不会回退** |
+| 配置文件指定了版本 | 作为菜单默认项；PHP/Nginx 若不在菜单中则警告并回退到可用版本，MySQL 仍报错退出 |
 | PHP 需要更新版本 | 安装时用 Debian 包（跟随 Debian）；之后用 [`upgrade.sh`](./upgrade.md) 切换到 sury 源升级 |
 
 ## 各来源说明
@@ -32,7 +32,8 @@ cd lnmp-debian
 | MySQL 组件发现 | 从仓库 `Release` 文件的 `Components` 字段动态提取全部 Server 组件（排除 cluster / tools / apt-config），不做版本写死。当前提供 `mysql-8.4-lts`、`mysql-9.7-lts`、`mysql-innovation`，仅向 amd64 提供 Debian 13 构建。 |
 | MySQL 选版流程 | 发现阶段临时启用全部组件展示所有可选版本 → 菜单标注 LTS / 创新版 → 选定后将源收敛到该版本所属**单个组件**再安装，避免不同系列的 `mysql-common`、`libmysqlclient` 等共享包版本混用。 |
 | MySQL 签名与兼容 | 使用 Oracle 2025 更新的签名密钥并校验指纹，避免过期密钥导致验签失败；不使用旧版 `Download_Mirror`。 |
-| 安装边界 | 不自动卸载现有服务；检测到 MariaDB 或未迁移的 MySQL 数据时停止安装。 |
+| 安装边界 | 不自动卸载现有服务；检测到 MariaDB 时停止安装；`mysql-community-server` 未安装且 `MYSQL_DATA_DIR` 已有数据时，提示输入 `clear` 全新安装或终止。自定义目录在软件包安装成功后才清空（装包失败则数据保留）；默认 `/var/lib/mysql` 需由包初始化，确认后立即清空。 |
+| 残留配置 | 残留的 MySQL / nginx.org APT 源、过期版本配置不再中断安装：源先备份再覆盖，PHP/Nginx 版本失效则回退到可用版本；仅 MySQL 版本仍要求确切值。 |
 | PHP / ACME / 依赖 | 由 Debian APT 安装，PHP 版本跟随 Debian 发行版。 |
 
 ## 安装前

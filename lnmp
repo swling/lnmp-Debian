@@ -11,8 +11,7 @@ elif [[ -r "${SCRIPT_DIR}/lnmp-debian.conf" ]]; then
 fi
 
 NGINX_CONF=/etc/nginx
-VHOST_DIR="${NGINX_CONF}/sites-available"
-ENABLED_VHOST_DIR="${NGINX_CONF}/sites-enabled"
+VHOST_DIR="${NGINX_CONF}/conf.d"
 SSL_DIR="${NGINX_CONF}/ssl"
 REWRITE_DIR="${NGINX_CONF}/rewrite"
 WEB_ROOT="${WEB_ROOT:-/home/wwwroot}"
@@ -79,7 +78,7 @@ require_root() {
 }
 
 require_nginx() {
-    [[ -x /usr/sbin/nginx && -d "$VHOST_DIR" && -d "$ENABLED_VHOST_DIR" ]] ||
+    [[ -x /usr/sbin/nginx && -d "$VHOST_DIR" ]] ||
         fail "LNMP Debian is not installed. Run lnmp-Debian/install.sh first."
 }
 
@@ -145,8 +144,7 @@ service_bundle() {
 create_vhost_config() {
     local domain=$1 names=$2 webroot=$3 rewrite=$4 php_config=$5 ipv6_listen=$6 access_log=$7
     local config="${VHOST_DIR}/${domain}.conf"
-    local enabled_config="${ENABLED_VHOST_DIR}/${domain}.conf"
-    [[ ! -e "$config" && ! -L "$config" && ! -e "$enabled_config" && ! -L "$enabled_config" ]] ||
+    [[ ! -e "$config" && ! -L "$config" ]] ||
         fail "Virtual host already exists: $domain"
     [[ "$webroot" == /* && "$webroot" =~ ^/[A-Za-z0-9_./-]+$ ]] ||
         fail "Web root must be an absolute path using only letters, digits, dot, underscore, slash, or hyphen."
@@ -173,7 +171,7 @@ server
 
     include rewrite/${rewrite}.conf;
     include snippets/${php_config};
-    include conf/cache-static.conf;
+    include cache-static.conf;
 
     location ~ /.well-known {
         allow all;
@@ -186,9 +184,7 @@ server
     ${access_log}
 }
 EOF
-    ln -s "../sites-available/${domain}.conf" "$enabled_config"
     if ! reload_nginx; then
-        rm -f "$enabled_config"
         rm -f "$config"
         fail "Nginx rejected the new virtual host; its config was removed."
     fi
@@ -277,28 +273,23 @@ add_vhost() {
 list_vhosts() {
     require_nginx
     printf 'Nginx Virtualhost list:\n'
-    find "$ENABLED_VHOST_DIR" -maxdepth 1 -type l -name '*.conf' ! -name default.conf -print |
+    find "$VHOST_DIR" -maxdepth 1 -type f -name '*.conf' ! -name default.conf -print |
         sed 's#^.*/##; s/\.conf$//' | sort
 }
 
 delete_vhost() {
-    local domain backup config enabled_config
+    local domain backup config
     require_root
     require_nginx
     list_vhosts
     read -r -p "Please enter domain you want to delete: " domain
     valid_domain "$domain" || fail "Invalid domain name."
     config="${VHOST_DIR}/${domain}.conf"
-    enabled_config="${ENABLED_VHOST_DIR}/${domain}.conf"
-    [[ -f "$config" ]] || fail "Virtual host does not exist: $domain"
-    [[ -L "$enabled_config" && "$(readlink -f "$enabled_config")" == "$(readlink -f "$config")" ]] ||
-        fail "Virtual host is not enabled through the Debian sites-enabled directory: $domain"
+    [[ -f "$config" && ! -L "$config" ]] || fail "Virtual host does not exist: $domain"
     backup="$(mktemp)"
     mv -- "$config" "$backup"
-    rm -- "$enabled_config"
     if ! reload_nginx; then
         mv "$backup" "$config"
-        ln -s "../sites-available/${domain}.conf" "$enabled_config"
         fail "Nginx rejected the change; the virtual host config was restored."
     fi
     rm -f "$backup"

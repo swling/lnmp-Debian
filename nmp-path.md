@@ -1,6 +1,13 @@
 ## Debian LNMP 目录结构速查表
 
-> 说明：标注 `[LNMP]` 的路径由本安装器/管理脚本创建或修改，其余为 Debian 包默认布局或自定义示例。
+> 标注说明（同一路径可带多个标注）：
+> - `[LNMP]`：由本项目的 `install.sh` / `lnmp` / `upgrade.sh` 创建或修改。
+> - `[包]`：由软件包安装提供。Nginx 来自 nginx.org，PHP、MySQL 等来自各自仓库；是否被本项目改动另以 `[LNMP]` 标注。
+> - `[运行时]`：服务启动后生成，重启可重建。
+> - `[自定义]`：默认不存在或由管理员自行决定，文中仅为示例。
+> - `[ACME]`：由 acme.sh 创建并管理。
+>
+> 未标注的路径按其所在目录的常规含义理解：所属软件包的默认布局、发行版系统目录，或运行时文件。
 > 文中 `8.4` 仅作示例：PHP 版本由安装时从 APT 检测决定，实际路径中的版本号随之变化。
 > 网站根目录、日志目录等可由 `/etc/lnmp-debian.conf` 覆盖，下表为默认值。
 
@@ -10,18 +17,18 @@
 | --- | --- | --- |
 | 用户配置入口 | `/etc/lnmp-debian.conf` | `[LNMP]` |
 | 内部状态 | `/etc/lnmp-debian/` | `[LNMP]` |
-| Nginx 主配置 | `/etc/nginx/nginx.conf` | 默认 |
-| 虚拟主机配置 | `/etc/nginx/sites-available/<域名>.conf` | `[LNMP]` |
-| 已启用站点 | `/etc/nginx/sites-enabled/<域名>.conf` | `[LNMP]` 软链 |
+| Nginx 主配置 | `/etc/nginx/nginx.conf` | `[包]`、`[LNMP]`（改 `user` 与 `access_log`） |
+| 虚拟主机配置 | `/etc/nginx/conf.d/<域名>.conf` | `[LNMP]`，由 `[包]` 的 `nginx.conf` 通过 `include conf.d/*.conf;` 加载 |
+| 默认站点 | `/etc/nginx/conf.d/default.conf` | `[LNMP]` |
 | PHP 片段 | `/etc/nginx/snippets/` | `[LNMP]` |
 | 伪静态规则 | `/etc/nginx/rewrite/` | `[LNMP]` |
 | 证书目录 | `/etc/nginx/ssl/<域名>/` | `[LNMP]` |
-| PHP-FPM 配置 | `/etc/php/<版本>/fpm/` | 默认 |
-| MySQL 配置 | `/etc/mysql/` | 默认 |
-| MySQL 数据 | `/var/lib/mysql/` | 默认，可软链到自定义目录 |
-| PHP-FPM socket | `/run/php/php<版本>-fpm.sock` | 运行时 |
+| PHP-FPM 配置 | `/etc/php/<版本>/fpm/` | `[包]`、`[LNMP]`（改进程池配置） |
+| MySQL 配置 | `/etc/mysql/` | `[包]`、`[LNMP]`（仅自定义数据目录时写入片段） |
+| MySQL 数据 | `/var/lib/mysql/` | `[包]`；迁移到自定义目录时由 `[LNMP]` 建软链 |
+| PHP-FPM socket | `/run/php/php<版本>-fpm.sock` | `[运行时]` |
 | 管理脚本 | `/usr/local/bin/lnmp`、`/usr/local/bin/addons.sh` | `[LNMP]` |
-| 网站根目录 | `/home/wwwroot/` | 自定义示例 |
+| 网站根目录 | `/home/wwwroot/` | `[自定义]` |
 
 ## 完整目录树
 
@@ -30,20 +37,12 @@
 ├── etc/                                  # 系统配置文件
 │   │
 │   ├── nginx/                            # Nginx 配置目录
-│   │   ├── nginx.conf                    # [默认] Nginx 主配置文件
+│   │   ├── nginx.conf                    # [包] [LNMP] 主配置（user / access_log 由安装器修改）
+│   │   ├── cache-static.conf             # [LNMP] 静态资源缓存片段（install.sh 生成，需手动 include）
 │   │   │
-│   │   ├── conf.d/                       # [自定义] 全局配置片段
-│   │   │   ├── gzip.conf                 # Gzip 压缩配置
-│   │   │   ├── security.conf             # 安全相关配置
-│   │   │   └── custom.conf               # 其他全局配置
-│   │   │
-│   │   ├── sites-available/              # [自定义] 虚拟主机配置存放目录
-│   │   │   ├── example.com.conf          # 网站配置
-│   │   │   └── default                   # 默认站点配置
-│   │   │
-│   │   ├── sites-enabled/                # 已启用的虚拟主机（lnmp 建软链）
-│   │   │   ├── example.com.conf          # → ../sites-available/example.com.conf
-│   │   │   └── default                   # → ../sites-available/default（安装器创建）
+│   │   ├── conf.d/                       # [包] nginx.org 布局，被 nginx.conf 自动加载
+│   │   │   ├── default.conf              # [LNMP] 默认站点配置
+│   │   │   └── example.com.conf          # [LNMP] 虚拟主机配置
 │   │   │
 │   │   ├── snippets/                     # [LNMP] 可复用配置片段（install.sh 生成）
 │   │   │   ├── enable-php.conf           # PHP FastCGI 片段（无 PATHINFO）
@@ -60,8 +59,8 @@
 │   │   │       ├── fullchain.cer         # 证书链
 │   │   │       └── <domain>.key          # 私钥
 │   │   │
-│   │   ├── modules-available/            # 可用动态模块配置
-│   │   └── modules-enabled/              # 已启用动态模块配置
+│   │   ├── modules/                      # [包] nginx.org 动态模块目录
+│   │   └── fastcgi_params                # [包] nginx.org FastCGI 参数（PHP 片段直接 include）
 │   │
 │   │
 │   ├── mysql/                            # MySQL 配置目录
@@ -70,7 +69,7 @@
 │   │   │   └── custom.cnf                # 自定义客户端等配置
 │   │   │
 │   │   └── mysql.conf.d/                 # MySQL 服务端配置
-│   │       ├── mysqld.cnf                # [默认] 服务端配置
+│   │       ├── mysqld.cnf                # [包] MySQL 服务端配置
 │   │       ├── custom.cnf                # [自定义] 服务端参数
 │   │       └── zz-lnmp-debian.cnf        # [LNMP] 仅自定义数据目录时写入
 │   │
@@ -86,7 +85,7 @@
 │   │       │   ├── php.ini               # FPM 配置文件
 │   │       │   ├── php-fpm.conf          # FPM 主配置
 │   │       │   ├── pool.d/               # FPM 进程池配置
-│   │       │   │   ├── www.conf          # [默认] 默认进程池
+│   │       │   │   ├── www.conf          # [包] [LNMP] 进程池配置由安装器改写
 │   │       │   │   └── custom.conf       # [自定义] 进程池配置
 │   │       │   └── conf.d/               # FPM 扩展配置（软链接）
 │   │       │

@@ -13,11 +13,11 @@ usage() {
 Usage: $PROG [options]
 
 备份内容：
-  域名配置   /etc/nginx/sites-available, /etc/nginx/sites-enabled
+  域名配置   /etc/nginx/conf.d
   SSL 证书   /etc/nginx/ssl（含 acme.sh 数据：账户密钥、配置、各域名证书）
   ACME 程序  /usr/local/acme.sh（--home 程序目录）
   LNMP 配置  /etc/lnmp-debian.conf, /etc/lnmp-debian/
-  Nginx 自定义片段 /etc/nginx/nginx.conf, conf.d, snippets, rewrite
+  Nginx 自定义片段 /etc/nginx/nginx.conf, conf.d, snippets, rewrite, cache-static.conf
   MySQL 配置   /etc/mysql 整个目录（my.cnf、conf.d/、mysql.conf.d/ 及自定义片段；不含数据库数据）
   PHP-FPM 配置     /etc/php/<当前版本>/fpm/（归档中去掉版本号，便于还原时指定版本）
   LNMP 相关 systemd 单元
@@ -79,12 +79,11 @@ PHP_VERSION="$(detect_php_version)"
 
 BACKUP_PATHS=(
     /etc/nginx/nginx.conf
+    /etc/nginx/cache-static.conf
     /etc/nginx/conf.d
     /etc/nginx/snippets
     /etc/nginx/rewrite
     /etc/nginx/ssl
-    /etc/nginx/sites-available
-    /etc/nginx/sites-enabled
     /etc/mysql
     /etc/lnmp-debian.conf
     /etc/lnmp-debian

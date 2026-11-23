@@ -18,7 +18,6 @@ MYSQL_SOURCE=/etc/apt/sources.list.d/mysql.list
 NGINX_KEYRING=/usr/share/keyrings/nginx-archive-keyring.gpg
 NGINX_SOURCE=/etc/apt/sources.list.d/nginx.list
 NGINX_PIN=/etc/apt/preferences.d/99nginx
-
 AUTO_CONFIRM=0
 
 usage() {
@@ -27,14 +26,15 @@ Usage:
   ./uninstall.sh [--yes]
 
 卸载 LNMP Debian 安装：
-  - purge APT 安装的 nginx / PHP / MySQL / acme.sh 等软件包
+  - purge APT 安装的 nginx / PHP / MySQL / acme.sh 等软件包，并 autoremove 残留依赖
   - 停止并删除 lnmp 自带的 systemd 单元
   - 用 *.lnmp-debian.orig 还原被修改过的配置
-  - 删除管理命令、LNMP 配置片段、APT 仓库与状态目录
+  - 删除管理命令、LNMP 配置片段、LNMP 生成的配置、APT 仓库与状态目录
 
 不会处理（仅打印警告，需你手动决定）：
   - MySQL 数据目录（可能在独立磁盘）与其备份
-  - 网站文件、SSL 证书、access 日志、ACME 数据、虚拟主机配置
+  - 网站文件、SSL 证书、access 日志、ACME 数据
+  - /etc/nginx/conf.d/ 下全部虚拟主机配置（含 default.conf；安装时会被覆盖）
 
 选项：
   -y, --yes   跳过确认直接执行
@@ -118,6 +118,9 @@ collect_prefix nginx
 collect_prefix php
 collect_prefix mysql-server
 collect_prefix mysql-client
+# mysql-server 只是元包，Oracle 实际安装的是 mysql-community-* 包，必须一并清除。
+collect_prefix mysql-community-server
+collect_prefix mysql-community-client
 if dpkg-query -W -f='${Package}\n' acme.sh 2>/dev/null | grep -qx 'acme.sh'; then
     PURGE_PKGS+=(acme.sh)
 fi
@@ -147,17 +150,18 @@ LNMP Debian 卸载计划
   - systemd 单元: lnmp-acme-renew.timer / .service, lnmp-php-upstream.service
   - 管理命令: /usr/local/bin/lnmp, /usr/local/bin/addons.sh, /usr/bin/lnmp
   - 配置片段与状态: /etc/nginx/snippets, /etc/nginx/rewrite（仅内置模板）,
-    /etc/nginx/conf（仅内置片段）, /etc/lnmp-debian.conf, /etc/lnmp-debian/
+    /etc/nginx/cache-static.conf, /etc/lnmp-debian.conf, /etc/lnmp-debian/
+  - 安装器生成的配置: /etc/mysql/mysql.conf.d/zz-lnmp-debian.cnf,
+    AppArmor 中为数据目录追加的规则（conf.d/default.conf 不删除）
   - APT 仓库与密钥: MySQL / nginx.org
   - 还原 .lnmp-debian.orig 备份后删除备份文件
 
 将保留（只警告，不处理，请自行决定）：
   - MySQL 数据目录: ${MYSQL_DATA_DIR}
   - MySQL 初始数据备份: /var/lib/mysql.lnmp-debian.orig
-  - MySQL 自定义配置: /etc/mysql/mysql.conf.d/zz-lnmp-debian.cnf
   - 网站文件: ${WEB_ROOT}
   - SSL 证书: ${NGINX_DIR}/ssl
-  - 虚拟主机配置: ${NGINX_DIR}/sites-available/ / sites-enabled/
+  - 全部虚拟主机配置: ${NGINX_DIR}/conf.d/（含 default.conf）
   - 日志: ${NGINX_LOG_DIR}
   - ACME 程序目录: ${ACME_HOME}
   - ACME 证书目录（--certhome）: ${ACME_CERT_HOME}（与上面的 SSL 证书同目录）
@@ -190,7 +194,6 @@ restore_orig() {
     fi
 }
 restore_orig "${NGINX_DIR}/nginx.conf.lnmp-debian.orig" "${NGINX_DIR}/nginx.conf"
-restore_orig "${NGINX_DIR}/sites-available/default.lnmp-debian.orig" "${NGINX_DIR}/sites-available/default"
 for v in "${PHP_VERSIONS[@]}"; do
     restore_orig "/etc/php/${v}/fpm/pool.d/www.conf.lnmp-debian.orig" \
                  "/etc/php/${v}/fpm/pool.d/www.conf"
@@ -240,13 +243,48 @@ if [[ -d "${NGINX_DIR}/rewrite" ]]; then
         warn "${NGINX_DIR}/rewrite 中仍有自定义规则，已保留整个目录。"
     fi
 fi
-if [[ -e "${NGINX_DIR}/conf/cache-static.conf" || -L "${NGINX_DIR}/conf/cache-static.conf" ]]; then
-    rm -f -- "${NGINX_DIR}/conf/cache-static.conf"
-    info "已删除: ${NGINX_DIR}/conf/cache-static.conf"
+if [[ -e "${NGINX_DIR}/cache-static.conf" || -L "${NGINX_DIR}/cache-static.conf" ]]; then
+    rm -f -- "${NGINX_DIR}/cache-static.conf"
+    info "已删除: ${NGINX_DIR}/cache-static.conf"
 fi
-if [[ -d "${NGINX_DIR}/conf" ]] && [[ -z "$(find "${NGINX_DIR}/conf" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-    rmdir -- "${NGINX_DIR}/conf" 2>/dev/null || true
+# 默认站点：安装时由模板无条件覆盖，卸载时无需删除，留给下次安装覆盖。
+# 这样也避免误删用户后来改过的 default.conf。
+
+# MySQL 自定义数据目录配置：安装器生成，内容仅 datadir 一行，直接移除。
+mysql_lnmp_cnf=/etc/mysql/mysql.conf.d/zz-lnmp-debian.cnf
+if [[ -f "$mysql_lnmp_cnf" ]]; then
+    rm -f -- "$mysql_lnmp_cnf"
+    info "已删除: $mysql_lnmp_cnf"
 fi
+
+# AppArmor：移除安装器为独立磁盘数据目录追加的规则，保留其他自定义规则。
+# 与 install.sh 写入时一致：从数据目录的父目录逐级到根目录，每级 r/x 两行，
+# 再加数据目录自身的 r 与 /** rwk 两行。
+apparmor_local=/etc/apparmor.d/local/usr.sbin.mysqld
+if [[ "$MYSQL_DATA_DIR" != /var/lib/mysql && -f "$apparmor_local" ]]; then
+    rules_tmp="$(mktemp)"
+    printf '%s\n' "${MYSQL_DATA_DIR}/ r," "${MYSQL_DATA_DIR}/** rwk," > "$rules_tmp"
+    apparmor_parent="$(dirname "$MYSQL_DATA_DIR")"
+    while [[ "$apparmor_parent" != / ]]; do
+        printf '%s\n' "${apparmor_parent}/ r," "${apparmor_parent}/ x," >> "$rules_tmp"
+        apparmor_parent="$(dirname "$apparmor_parent")"
+    done
+    filtered_tmp="$(mktemp)"
+    awk 'NR==FNR { drop[$0]=1; next } !($0 in drop)' \
+        "$rules_tmp" "$apparmor_local" > "$filtered_tmp"
+    if ! cmp -s "$apparmor_local" "$filtered_tmp"; then
+        chmod --reference="$apparmor_local" "$filtered_tmp"
+        mv -- "$filtered_tmp" "$apparmor_local"
+        [[ -s "$apparmor_local" ]] || rm -f -- "$apparmor_local"
+        if command -v apparmor_parser >/dev/null 2>&1; then
+            apparmor_parser -r /etc/apparmor.d/usr.sbin.mysqld >/dev/null 2>&1 ||
+                warn "AppArmor 重新加载失败，请手动执行: apparmor_parser -r /etc/apparmor.d/usr.sbin.mysqld"
+        fi
+        info "已移除 AppArmor 中为 ${MYSQL_DATA_DIR} 追加的规则"
+    fi
+    rm -f -- "$rules_tmp" "$filtered_tmp"
+fi
+
 [[ -e "$SYSTEM_CONFIG" ]] && { rm -f -- "$SYSTEM_CONFIG"; info "已删除: $SYSTEM_CONFIG"; }
 if [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]]; then
     rm -rf -- "$STATE_DIR" && info "已删除: $STATE_DIR"
@@ -257,7 +295,7 @@ for unit in lnmp-acme-renew.service lnmp-acme-renew.timer lnmp-php-upstream.serv
 done
 systemctl daemon-reload >/dev/null 2>&1 || true
 
-# ---- 5. 保护数据库数据：移除软链本身 ----
+# ---- 5. 保护数据库数据：仅移除软链，不动数据 ----
 step "数据库安全处理（仅移除软链，不动数据）"
 if [[ -L /var/lib/mysql ]]; then
     info "移除软链 /var/lib/mysql -> $(readlink /var/lib/mysql)"
@@ -266,15 +304,18 @@ if [[ -L /var/lib/mysql ]]; then
 else
     info "/var/lib/mysql 不是软链，未做改动"
 fi
-warn "MySQL 数据目录 ${MYSQL_DATA_DIR}、备份 /var/lib/mysql.lnmp-debian.orig、配置 /etc/mysql/mysql.conf.d/zz-lnmp-debian.cnf 均保留，请自行处理。"
+warn "MySQL 数据目录 ${MYSQL_DATA_DIR} 与备份 /var/lib/mysql.lnmp-debian.orig 均保留，请自行处理。"
 
 # ---- 6. 删除 APT 仓库与密钥 ----
 step "删除 APT 仓库与密钥"
-for f in "$MYSQL_SOURCE" "$MYSQL_KEYRING" "$NGINX_SOURCE" "$NGINX_KEYRING" "$NGINX_PIN"; do
+for f in "$MYSQL_SOURCE" "$MYSQL_KEYRING" "$NGINX_SOURCE" "$NGINX_KEYRING" "$NGINX_PIN" \
+         "${NGINX_SOURCE}.lnmp-debian.orig" "${NGINX_PIN}.lnmp-debian.orig"; do
     [[ -e "$f" || -L "$f" ]] && { rm -f -- "$f"; info "已删除: $f"; }
 done
 if (( ${#PURGE_PKGS[@]} )); then
     DEBIAN_FRONTEND=noninteractive apt-get purge -y "${PURGE_PKGS[@]}" || warn "apt-get purge 返回错误，请检查输出。"
+    # 按 MySQL 官方卸载流程清理随服务器自动安装的依赖（如 mysql-community-libs/common）。
+    DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y || warn "apt-get autoremove 返回错误，请检查输出。"
 else
     info "未检测到需要 purge 的软件包"
 fi
@@ -312,16 +353,16 @@ cat <<EOF
 ================================================================
 卸载完成
 ----------------------------------------------------------------
-已移除 LNMP 软件、管理命令、LNMP 配置与 APT 仓库，并还原了
-可被还原的 .lnmp-debian.orig 配置。
+已移除 LNMP 软件、管理命令、安装器生成的配置与 APT 仓库，并还原了
+可被还原的 .lnmp-debian.orig 配置。/etc/nginx/conf.d/ 下所有配置（含
+default.conf）均未处理，下次安装时 default.conf 会被直接覆盖。
 
 以下数据未被处理，请自行确认：
   数据库数据:     ${MYSQL_DATA_DIR}
   数据库初始备份: /var/lib/mysql.lnmp-debian.orig
-  数据库配置:     /etc/mysql/mysql.conf.d/zz-lnmp-debian.cnf
   网站文件:       ${WEB_ROOT}
   SSL 证书:       ${NGINX_DIR}/ssl
-  虚拟主机配置:   ${NGINX_DIR}/sites-available/ / sites-enabled/
+  站点配置:       ${NGINX_DIR}/conf.d/（含 default.conf）
   日志:           ${NGINX_LOG_DIR}
   ACME 程序目录:  ${ACME_HOME}
   ACME 证书目录:  ${ACME_CERT_HOME}（与 SSL 证书同目录）

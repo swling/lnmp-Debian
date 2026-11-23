@@ -20,6 +20,8 @@ sudo ./sync-lnmp.sh
 
 `lnmp` 只管理 MySQL 服务，不创建、修改或删除数据库及数据库用户；数据库内容由应用部署流程管理。
 
+`lnmp vhost add/list/del` 直接操作 `/etc/nginx/conf.d/<域名>.conf`，不使用 `sites-available` / `sites-enabled` 软链。
+
 管理命令不会自动删除网站文件。
 
 `kill` 命令映射为 systemd 的正常停止操作，不会对服务进程发送不可恢复的强制终止信号。
