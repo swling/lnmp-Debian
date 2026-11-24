@@ -708,7 +708,11 @@ upgrade_php_sury() {
     done
 
     systemctl daemon-reload
-    if ! systemctl enable --now "php${branch}-fpm"; then
+    # The new package may have already started PHP-FPM with its stock pool
+    # configuration. Restart explicitly so the socket is recreated with the
+    # www:www ownership that Nginx expects.
+    if ! systemctl enable "php${branch}-fpm" ||
+       ! systemctl restart "php${branch}-fpm"; then
         printf '%s\n' "$current_version" > "$PHP_VERSION_STATE"
         for nginx_snippet in /etc/nginx/snippets/enable-php.conf \
                              /etc/nginx/snippets/enable-php-pathinfo.conf; do
