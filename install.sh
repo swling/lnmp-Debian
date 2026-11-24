@@ -655,6 +655,27 @@ disable_nginx_access_log() {
     mv "$tmp" "$conf"
 }
 
+enable_nginx_gzip() {
+    local conf=$1 tmp http_line
+    # An active include may use either the prefix-relative or absolute path.
+    grep -qE '^[[:space:]]*include[[:space:]]+([^;]*/)?gzip\.conf[[:space:]]*;' "$conf" &&
+        return 0
+    tmp="$(mktemp "${conf}.XXXXXX")"
+    http_line="$(awk '/^[[:space:]]*http[[:space:]]*\{/ { print NR; exit }' "$conf")"
+    [[ -n "$http_line" ]] || fail "Cannot find the http block in ${conf}; refusing to add the gzip include."
+    awk -v http_line="$http_line" '
+        { lines[NR] = $0 }
+        END {
+            for (i = 1; i <= NR; i++) {
+                print lines[i]
+                if (i == http_line) print "    include gzip.conf;"
+            }
+        }
+    ' "$conf" > "$tmp"
+    chmod --reference="$conf" "$tmp"
+    mv "$tmp" "$conf"
+}
+
 install_shared_nginx_conf() {
     local source_dir=$1 target_dir=$2 source target name
     [[ -d "$source_dir" ]] || fail "Bundled Nginx config directory is missing: ${source_dir}"
@@ -662,7 +683,7 @@ install_shared_nginx_conf() {
     for source in "$source_dir"/*.conf; do
         [[ -f "$source" ]] || continue
         name="${source##*/}"
-        # default-site.conf is a site template, not a reusable snippet.
+        # default-site.conf is a site template, not a reusable top-level config.
         [[ "$name" == default-site.conf ]] && continue
         target="${target_dir}/${name}"
         if [[ ! -e "$target" && ! -L "$target" ]]; then
@@ -736,6 +757,8 @@ EOF
         # Disable the http-level access log by default. Virtual hosts with an
         # explicit access_log directive can still opt in to logging.
         disable_nginx_access_log "$nginx_conf"
+        # Load the top-level gzip.conf from within the http block.
+        enable_nginx_gzip "$nginx_conf"
     fi
 
     # nginx.org packages load conf.d/*.conf; the default site lives there too.

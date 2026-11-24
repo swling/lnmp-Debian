@@ -150,7 +150,7 @@ LNMP Debian 卸载计划
   - systemd 单元: lnmp-acme-renew.timer / .service, lnmp-php-upstream.service
   - 管理命令: /usr/local/bin/lnmp, /usr/local/bin/addons.sh, /usr/bin/lnmp
   - 配置片段与状态: /etc/nginx/snippets, /etc/nginx/rewrite（仅内置模板）,
-    /etc/nginx/cache-static.conf, /etc/lnmp-debian.conf, /etc/lnmp-debian/
+    /etc/nginx/cache-static.conf, /etc/nginx/gzip.conf, /etc/lnmp-debian.conf, /etc/lnmp-debian/
   - 安装器生成的配置: /etc/mysql/mysql.conf.d/zz-lnmp-debian.cnf,
     AppArmor 中为数据目录追加的规则（conf.d/default.conf 不删除）
   - APT 仓库与密钥: MySQL / nginx.org
@@ -245,6 +245,10 @@ fi
 if [[ -e "${NGINX_DIR}/cache-static.conf" || -L "${NGINX_DIR}/cache-static.conf" ]]; then
     rm -f -- "${NGINX_DIR}/cache-static.conf"
     info "已删除: ${NGINX_DIR}/cache-static.conf"
+fi
+if [[ -e "${NGINX_DIR}/gzip.conf" || -L "${NGINX_DIR}/gzip.conf" ]]; then
+    rm -f -- "${NGINX_DIR}/gzip.conf"
+    info "已删除: ${NGINX_DIR}/gzip.conf"
 fi
 # 默认站点：安装时由模板无条件覆盖，卸载时无需删除，留给下次安装覆盖。
 # 这样也避免误删用户后来改过的 default.conf。

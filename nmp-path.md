@@ -17,9 +17,10 @@
 | --- | --- | --- |
 | 用户配置入口 | `/etc/lnmp-debian.conf` | `[LNMP]` |
 | 内部状态 | `/etc/lnmp-debian/` | `[LNMP]` |
-| Nginx 主配置 | `/etc/nginx/nginx.conf` | `[包]`、`[LNMP]`（改 `user` 与 `access_log`） |
+| Nginx 主配置 | `/etc/nginx/nginx.conf` | `[包]`、`[LNMP]`（改 `user`、`access_log`，加 gzip include） |
 | 虚拟主机配置 | `/etc/nginx/conf.d/<域名>.conf` | `[LNMP]`，由 `[包]` 的 `nginx.conf` 通过 `include conf.d/*.conf;` 加载 |
 | 默认站点 | `/etc/nginx/conf.d/default.conf` | `[LNMP]` |
+| Gzip 配置 | `/etc/nginx/gzip.conf` | `[LNMP]`，由 `nginx.conf` 加载 |
 | PHP 片段 | `/etc/nginx/snippets/` | `[LNMP]` |
 | 伪静态规则 | `/etc/nginx/rewrite/` | `[LNMP]` |
 | 证书目录 | `/etc/nginx/ssl/<域名>/` | `[LNMP]` |
@@ -37,10 +38,11 @@
 ├── etc/                                  # 系统配置文件
 │   │
 │   ├── nginx/                            # Nginx 配置目录
-│   │   ├── nginx.conf                    # [包] [LNMP] 主配置（user / access_log 由安装器修改）
+│   │   ├── nginx.conf                    # [包] [LNMP] 主配置（user / access_log / gzip include 由安装器修改）
 │   │   ├── cache-static.conf             # [LNMP] 静态资源缓存片段（install.sh 生成，需手动 include）
+│   │   ├── gzip.conf                     # [LNMP] gzip 默认配置（由 nginx.conf 加载）
 │   │   │
-│   │   ├── conf.d/                       # [包] nginx.org 布局，被 nginx.conf 自动加载
+│   │   ├── conf.d/                       # [包] nginx.org 布局，被 nginx.conf 自动加载，仅放 vhost
 │   │   │   ├── default.conf              # [LNMP] 默认站点配置
 │   │   │   └── example.com.conf          # [LNMP] 虚拟主机配置
 │   │   │

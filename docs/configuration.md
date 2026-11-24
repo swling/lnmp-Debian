@@ -53,6 +53,7 @@ NGINX_CHANNEL="stable"
 | Nginx 主配置 | `/etc/nginx/nginx.conf` |
 | 站点配置 | `/etc/nginx/conf.d/<域名>.conf`，由 nginx.org 包的 `include /etc/nginx/conf.d/*.conf;` 自动加载 |
 | 默认站点 | `/etc/nginx/conf.d/default.conf` |
+| Gzip 默认配置 | `/etc/nginx/gzip.conf`（由 `nginx.conf` 加载） |
 | Nginx 复用片段 | `/etc/nginx/snippets/`（`enable-php.conf`、`enable-php-pathinfo.conf`、`pathinfo.conf`） |
 | 伪静态规则 | `/etc/nginx/rewrite/<名称>.conf` |
 | 通用配置片段 | `/etc/nginx/cache-static.conf`，需自行 `include cache-static.conf;` |
@@ -68,13 +69,14 @@ NGINX_CHANNEL="stable"
 
 | 主题 | 说明 |
 | --- | --- |
-| 配置路径策略 | 安装与升级均使用 nginx.org 官方包，配置也采用其原生布局：站点直接写入 `/etc/nginx/conf.d/`，不创建 `sites-available` / `sites-enabled`，也不修改 `nginx.conf` 的 include。不创建旧版 `/usr/local` 配置路径的兼容链接 |
+| 配置路径策略 | 安装与升级均使用 nginx.org 官方包，配置也采用其原生布局：站点直接写入 `/etc/nginx/conf.d/`，不创建 `sites-available` / `sites-enabled`，也不为站点修改 `nginx.conf` 的 include；仅在 `http` 块中加一行 `include gzip.conf;` 加载顶层通用配置。不创建旧版 `/usr/local` 配置路径的兼容链接 |
 | 访问日志 | 安装器在 `nginx.conf` 的 `http` 块中设置 `access_log off;`；默认站点及未显式配置访问日志的 vhost 不写日志，`lnmp vhost add` 中启用访问日志的站点在自己的 server 块写入独立 `access_log` 并覆盖该默认值 |
-| 通用片段部署 | 项目 `conf/` 目录中的片段（目前为 `cache-static.conf`）复制到 `/etc/nginx/`，该文件不被 `nginx.conf` 自动加载；已有同名片段不覆盖 |
+| Gzip 默认开启 | 安装器把 [conf/gzip.conf](../conf/gzip.conf) 部署到顶层 `/etc/nginx/gzip.conf`，并在 `nginx.conf` 的 `http` 块加入 `include gzip.conf;` 加载，对所有站点生效；`conf.d/` 仍只放 vhost 配置；已有同名文件不覆盖，可自行调整参数 |
+| 通用片段部署 | 项目 `conf/` 目录中的通用配置（目前为 `cache-static.conf`、`gzip.conf`）复制到 `/etc/nginx/`；`cache-static.conf` 需 vhost 自行 `include`，`gzip.conf` 由 `nginx.conf` 统一加载；已有同名文件不覆盖 |
 | FastCGI 兼容 | `enable-php.conf` / `enable-php-pathinfo.conf` 使用 nginx.org 包自带的 `fastcgi_params`，并显式写入 `fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;`，不依赖 Debian 包才有的 `fastcgi.conf` |
 | 新 vhost | 自动 `include cache-static.conf;`，不再生成重复的静态文件 location 块；已有主机需自行添加该 include 并移除重叠的静态 location |
 | 默认站点部署 | 从 [conf/default-site.conf](../conf/default-site.conf) 渲染到 `/etc/nginx/conf.d/default.conf`，按 `DEFAULT_WEB_ROOT` 设置根目录、`index.php` 和 PHP-FPM 处理；安装时直接覆盖已有文件（包括 nginx.org 包自带的原始默认站点），不做内容判断 |
-| 卸载时的配置清理 | `uninstall.sh` 删除 `mysql.conf.d/zz-lnmp-debian.cnf` 及 AppArmor 中为独立磁盘数据目录追加的规则；`conf.d/default.conf` 不删除，因安装时本就直接覆盖。用户自建的 `conf.d/<域名>.conf`、网站文件、SSL 证书、日志、ACME 数据和 MySQL 数据目录/初始备份均保留 |
+| 卸载时的配置清理 | `uninstall.sh` 删除顶层 `gzip.conf`、`cache-static.conf`、`mysql.conf.d/zz-lnmp-debian.cnf` 及 AppArmor 中为独立磁盘数据目录追加的规则；`conf.d/default.conf` 不删除，避免误删用户改动。用户自建的 `conf.d/<域名>.conf`、网站文件、SSL 证书、日志、ACME 数据和 MySQL 数据目录/初始备份均保留 |
 | Socket 约定 | Nginx 与 PHP-FPM 共用同一个版本化 socket；安装器写入 FPM pool 的 socket/属主/权限设置、关闭会覆盖属主/属组的 ACL 设置，并把 `nginx.conf` 的 worker 用户设为 `www`（nginx.org 包默认 `nginx`），匹配 `www:www` 的 socket；启动后检查 socket 属主 |
 
 更完整的目录树见 [Debian LNMP 目录结构速查表](../nmp-path.md)。
