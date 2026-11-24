@@ -568,6 +568,17 @@ select_install_versions() {
     finalize_mysql_repository
 }
 
+confirm_install_versions() {
+    printf '\nSelected versions:\n'
+    printf 'Nginx version: %s\nPHP version:   %s\nMySQL version: %s\n' "$NGINX_VERSION" "$PHP_VERSION" "$MYSQL_VERSION"
+    # Non-interactive runs cannot confirm; the version selectors already fell back to defaults.
+    [[ -t 0 ]] || return 0
+    if ! read -r -p "Press Enter to start installation, or Ctrl+C to abort: " answer; then
+        fail "Installation aborted; no packages were installed."
+    fi
+    printf '\n'
+}
+
 install_packages() {
     local -a php_packages=(
         "php${PHP_VERSION}-cli"
@@ -920,6 +931,7 @@ main() {
     validate_configuration_and_existing_data
     prepare_package_sources
     select_install_versions
+    confirm_install_versions
     install_packages
     clear_mysql_data_if_confirmed
     configure_mysql_data_directory
