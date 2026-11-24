@@ -14,6 +14,10 @@ NGINX_KEYRING=/usr/share/keyrings/nginx-archive-keyring.gpg
 NGINX_SOURCE=/etc/apt/sources.list.d/nginx.list
 NGINX_PIN=/etc/apt/preferences.d/99nginx
 NGINX_REPO_BASE=https://nginx.org/packages
+PHP_REPO_URL=https://packages.sury.org/php
+PHP_SOURCE=/etc/apt/sources.list.d/php.list
+PHP_KEYRING=/usr/share/keyrings/debsuryorg-archive-keyring.gpg
+PHP_PIN=/etc/apt/preferences.d/99sury-php
 SYSTEM_CONFIG=/etc/lnmp-debian.conf
 
 if [[ -r "$SYSTEM_CONFIG" ]]; then
@@ -43,13 +47,12 @@ Usage: install.sh
 
 Install the LNMP Debian profile on Debian 13 or later:
   Nginx: nginx.org official APT repository (stable or mainline channel)
-  PHP: Debian APT repositories
+  PHP: sury APT repository
   MySQL: Oracle MySQL APT repository (server components discovered dynamically)
   ACME client: Debian APT repository
 
-Nginx and MySQL are installed from their official APT repositories. PHP uses
-Debian packages at install time; use upgrade.sh with sury to move to a newer
-PHP branch later.
+Nginx and MySQL are installed from their official APT repositories, PHP from
+sury. Installing from sury up front keeps PHP upgrades on the same source.
 EOF
 }
 
@@ -239,6 +242,7 @@ select_php_version() {
     local choice index default_index candidate marker php_major
     local -a versions
     local -a package_names
+    local -a sury_versions
     mapfile -t package_names < <(
         apt-cache pkgnames |
             grep -E '^php[0-9]+\.[0-9]+-fpm$' |
@@ -251,12 +255,13 @@ select_php_version() {
         [[ "$php_major" =~ ^[0-9]+$ ]] || continue
         # Skip older branches instead of aborting when the repo also offers PHP 7.x.
         (( php_major >= 8 )) || continue
-        if apt-cache policy "php${candidate}-fpm" |
-            awk '/Candidate:/ { found = ($2 != "(none)") } END { exit !found }'; then
-            versions+=("$candidate")
-        fi
+        # Only offer branches that sury actually publishes; Debian-only branches
+        # would otherwise be installed from Debian despite the sury pin.
+        mapfile -t sury_versions < <(list_package_versions "php${candidate}-fpm" packages.sury.org)
+        ((${#sury_versions[@]} > 0)) || continue
+        versions+=("$candidate")
     done
-    ((${#versions[@]} > 0)) || fail "No PHP 8+ FPM packages are available from the configured APT repositories."
+    ((${#versions[@]} > 0)) || fail "No PHP 8+ FPM packages are available from sury."
     default_index=$((${#versions[@]} - 1))
     if [[ -n "$PHP_VERSION" ]]; then
         for index in "${!versions[@]}"; do
@@ -352,6 +357,55 @@ install_mysql_repository() {
     printf 'Discovered MySQL components: %s\n' "$MYSQL_COMPONENTS"
     rm -f "$key_tmp"
     trap - RETURN
+}
+
+install_php_repository() {
+    local codename architecture key_tmp source_tmp pin_tmp fingerprint
+
+    codename="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-}")"
+    architecture="$(dpkg --print-architecture)"
+    [[ "$architecture" == amd64 || "$architecture" == arm64 || "$architecture" == armhf ]] ||
+        fail "The sury PHP repository does not support this architecture: ${architecture}"
+    [[ -n "$codename" ]] || fail "Could not determine Debian release codename."
+
+    # Leftover unrelated sources are backed up before overwriting, like the nginx source.
+    if [[ -e "$PHP_SOURCE" ]] &&
+       ! grep -Fq 'packages.sury.org/php' "$PHP_SOURCE"; then
+        cp -p -- "$PHP_SOURCE" "${PHP_SOURCE}.lnmp-debian.orig" 2>/dev/null || true
+        warn "Existing APT source ${PHP_SOURCE} is unrelated to sury; backed up and overwritten."
+    fi
+    if [[ -e "$PHP_PIN" ]] &&
+       ! grep -Fq 'Pin: origin packages.sury.org' "$PHP_PIN"; then
+        cp -p -- "$PHP_PIN" "${PHP_PIN}.lnmp-debian.orig" 2>/dev/null || true
+        warn "Existing APT preference ${PHP_PIN} is unrelated to sury; backed up and overwritten."
+    fi
+
+    install -d -m 0755 /usr/share/keyrings "$(dirname "$PHP_SOURCE")" "$(dirname "$PHP_PIN")"
+    key_tmp="$(mktemp)"
+    source_tmp="$(mktemp "${PHP_SOURCE}.XXXXXX")"
+    pin_tmp="$(mktemp "${PHP_PIN}.XXXXXX")"
+    trap 'rm -f "$key_tmp" "$source_tmp" "$pin_tmp"' RETURN
+
+    curl --fail --silent --show-error --location \
+        "${PHP_REPO_URL}/apt.gpg" -o "$key_tmp"
+    fingerprint="$(gpg --show-keys --with-colons "$key_tmp" |
+        awk -F: '$1 == "fpr" { gsub(/ /, "", $10); print $10; exit }')"
+    [[ "$fingerprint" == 15058500A0235D97F5D10063B188E2B695BD4743 ]] ||
+        fail "Unexpected sury PHP repository signing key fingerprint: ${fingerprint:-unreadable}"
+    install -m 0644 "$key_tmp" "$PHP_KEYRING"
+
+    printf 'deb [signed-by=%s] %s/ %s main\n' \
+        "$PHP_KEYRING" "$PHP_REPO_URL" "$codename" > "$source_tmp"
+    # sury and Debian ship identically named php8.x-* packages. Pin sury above
+    # the Debian default but below 1000 so apt never downgrades.
+    printf 'Package: *\nPin: origin packages.sury.org\nPin-Priority: 900\n' > "$pin_tmp"
+    chmod 0644 "$source_tmp" "$pin_tmp"
+    mv "$source_tmp" "$PHP_SOURCE"
+    mv "$pin_tmp" "$PHP_PIN"
+
+    rm -f "$key_tmp" "$source_tmp" "$pin_tmp"
+    trap - RETURN
+    printf 'PHP APT source configured: %s %s main (sury)\n' "$PHP_REPO_URL" "$codename"
 }
 
 install_nginx_repository() {
@@ -501,6 +555,7 @@ prepare_package_sources() {
     apt-get install -y ca-certificates curl gnupg ||
         fail "Could not install ca-certificates / curl / gnupg; check APT sources and network."
     install_mysql_repository
+    install_php_repository
     install_nginx_repository
     apt-get update || warn "apt-get update failed after configuring sources; version list may be incomplete."
 }
@@ -525,8 +580,11 @@ install_packages() {
         "php${PHP_VERSION}-zip"
         "php${PHP_VERSION}-bcmath"
         "php${PHP_VERSION}-intl"
-        "php${PHP_VERSION}-opcache"
     )
+    # OPcache is part of the PHP core from 8.5 onward; sury has no separate package.
+    if ! dpkg --compare-versions "$PHP_VERSION" ge 8.5; then
+        php_packages+=("php${PHP_VERSION}-opcache")
+    fi
     apt-get install -y "nginx=${NGINX_VERSION}" "${php_packages[@]}" \
         "mysql-server=${MYSQL_VERSION}" acme.sh
 

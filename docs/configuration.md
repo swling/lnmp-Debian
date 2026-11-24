@@ -8,7 +8,7 @@
 | `DEFAULT_WEB_ROOT` | `${WEB_ROOT}/default` | 未匹配域名时的默认站点目录 |
 | `NGINX_LOG_DIR` | `/var/log/nginx` | Nginx 日志目录 |
 | `MYSQL_DATA_DIR` | `/var/lib/mysql` | MySQL 数据目录 |
-| `PHP_VERSION` | 空 | 留空则交互选择 APT 中可用版本 |
+| `PHP_VERSION` | 空 | 留空则交互选择 sury 中可用分支 |
 | `NGINX_VERSION` | 空 | 同上 |
 | `MYSQL_VERSION` | 空 | 同上 |
 | `NGINX_CHANNEL` | `stable` | nginx.org 通道：`stable` / `mainline`；安装时选源，升级时也可用命令参数覆盖 |
@@ -28,7 +28,7 @@ NGINX_CHANNEL="stable"
 
 | 组件 | 版本来源 | 留空时 | 非留空时 |
 | --- | --- | --- | --- |
-| PHP | Debian APT | 交互选择，默认最新 | 作为菜单默认；已不在源中则警告并回退到可用版本 |
+| PHP | sury APT | 交互选择，默认最新分支 | 作为菜单默认；已不在源中则警告并回退到可用版本 |
 | Nginx | nginx.org APT | 交互选择，默认最新 | 作为菜单默认；已不在源中则警告并回退到可用版本 |
 | MySQL | Oracle APT | 交互选择，默认最高 LTS | 作为菜单默认，须为菜单中的确切值，否则报错退出 |
 

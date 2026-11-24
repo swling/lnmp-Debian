@@ -19,7 +19,7 @@ sudo ./upgrade.sh mysql [版本]
 
 ### 关于软件来源
 
-- **PHP 没有官方 Linux APT 仓库**：php.net 只发布源码，Debian 的 `php8.x-*` 包由发行版打包、版本受 Debian 节奏限制。因此脚本默认使用第三方仓库 **deb.sury.org**（并非 PHP 官方仓库），校验签名指纹后设置 Pin 优先级 900，以优先于 Debian 同名包，可跨 major.minor 分支升级。若坚持使用上游官方源码，可显式加 `--source` 走 php.net tarball 编译路径，该遗留路径仅限同一 major.minor 分支内升级。
+- **PHP 没有官方 Linux APT 仓库**：php.net 只发布源码，Debian 的 `php8.x-*` 包由发行版打包、版本受 Debian 节奏限制。因此安装器与升级脚本均默认使用第三方仓库 **deb.sury.org**（并非 PHP 官方仓库），校验签名指纹后设置 Pin 优先级 900，以优先于 Debian 同名包，可跨 major.minor 分支升级。若坚持使用上游官方源码，可显式加 `--source` 走 php.net tarball 编译路径，该遗留路径仅限同一 major.minor 分支内升级。
 - **Nginx 安装与升级同源**：`install.sh` 与 `upgrade.sh` 都使用 nginx.org 官方仓库，校验签名指纹并设置 Pin 优先级 900。仓库地址按官方页面区分：stable 为 `https://nginx.org/packages/debian <代号> nginx`，mainline 为 `https://nginx.org/packages/mainline/debian <代号> nginx`（stable 路径**不带** `/stable` 段）。配置也采用官方布局：站点直接写入 `/etc/nginx/conf.d/`，PHP 片段使用包自带的 `fastcgi_params` 并显式设置 `SCRIPT_FILENAME`，不修改 `nginx.conf` 的 include，也不创建 `sites-available` / `sites-enabled`。升级使用 `--force-confold` 保留现有配置，升级后请核对 `nginx -V` 和站点行为。Nginx 官方仓库按当前 LNMP Debian 支持范围限定为 Debian trixie。
 - **MySQL 安装与升级使用同一来源**：均为 `install.sh` 配置的 Oracle 官方 APT 仓库，数据目录仍按独立磁盘约定由 `install.sh` 迁移。
 
