@@ -32,3 +32,25 @@ PHP 默认走 sury：先配置仓库，再交互式列出可用分支（默认�
 脚本在交互环境下要求输入 `yes` 确认风险；`--yes` 可跳过该确认，但必须明确指定版本，非交互环境同样必须明确指定版本并使用 `--yes`，例如 `sudo ./upgrade.sh --yes nginx 1.28.0 stable`、`sudo ./upgrade.sh --yes php 8.4.17`。升级会改动正在运行的服务，PHP 升级还会替换运行时，属于高风险操作，请在维护窗口执行，并确认自己已完成备份。sury 升级会替换 FPM 服务与 CLI 包，切换失败时脚本会尝试恢复原 FPM 服务；`--source` 则会停用原 Debian FPM 单元并将 FPM 服务切到上游构建，系统 PHP CLI 仍由 Debian 包管理，切换失败时会尝试恢复原 FPM 服务与原标记。
 
 `lnmp vhost add` 的站点目录默认使用配置中的 `WEB_ROOT/<域名>`，也可在创建时输入其他绝对路径。伪静态规则恢复了旧版内置模板（如 `wordpress`、`discuzx`、`thinkphp`、`laravel`、`joomla` 等）；创建时可选规则模板，默认不启用。安装器只补齐缺少的模板，不覆盖 `/etc/nginx/rewrite/` 中已有的文件。自定义规则可放入该目录的 `<名称>.conf`，创建虚拟主机时选择名称即可；未存在的自定义名称会创建一个空模板供编辑。创建时也可选择 PHP Pathinfo 和 IPv6 监听。
+
+### 升级后清理
+php
+以 8.3.x 为例
+```sh
+apt purge 'php8.3*'
+apt autoremove --purge
+apt clean
+```
+NGINX、MySQL
+```sh
+apt autoremove --purge
+apt clean
+```
+
+###
+Debian APT 包管理，最好建立一个明确的原则：
+1. /usr/ 下由 APT 管理的程序和库，全部交给 APT 清理。
+2. /etc/ 下的自定义配置，备份后再清理。
+3. /var/lib/ 下的数据，必须确认用途后才能删除。
+4. /var/log/ 下的历史日志，根据实际需要清理。
+5. 不要直接对整个 /usr/lib、/etc 或 /var/lib 执行递归删除。
